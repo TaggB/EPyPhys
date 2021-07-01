@@ -1,6 +1,8 @@
 # EPyPhys
 ##Analysis Routines for Patch Clamp Electrophysiology files
 -----
+Full Illustrative page coming soon
+-----
 EPyPhys was borne of necessity. Existing softwares for analysing excised patch data are built largely on those designed to handle whole-cell data, such as EPSCs or minis. This often feels as though the software uses the signal UI as a barrier between an experimenter and their data. In-built routines are often hidden, creating black box scenarios during processing. Creation of custom routines often require learning instance-specific (useless) macro language. Finally, data cleaning and merging routines in UI type softwares leave a lot to be desired. </br>  
 EPyPhys:
 * is accessible : It is Python based. Python is the consistently fastest growing programming language. It is easy to learn. It is mostly based in pandas and numpy. All custom wrangling can be performed by using these (frequently used) packages. They are beautifully written, fast, and easy to learn. EpyPhys uses a functional programming philosophy, rather than the more standard object-orientated practice. This allows users to build on, and integrate existing functions without learning about unique class structures (which would defeat the point of them not learning a macro language in other software) and also allows use of help()
