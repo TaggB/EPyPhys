@@ -10,12 +10,18 @@ actuator-driven fast jump protocols; or other excised-patch electrophysiology.
 
 Sections:
     - ABF file import
-    - Data cleaning: baselining, wave inspection and removal.
+    - Data cleaning: baselining, wave inspection and removal. Smart wave cleaning.
+    - Routines: File merging on protocol, wave appending (sweeps to sweeps), chaining sweeps (merging into single continous time), splitting by timepoints, and wave alignment.
     - Analysis
-    -   Pairwise Non-Stationary fluctuation (noise) analysis (Sigg,1997;Heinemann and Conti,1997)
+    -   Fitting of exponentials as monoexponential/weighted sum
+    -   Pairwise Non-Stationary fluctuation (noise) analysis (Sigg,1997; Heinemann and Conti,1997)
     -   NBQX unbinding (Rosenmund et al., 1998; Coombs et al., 2017)
     -   Deactivation and Desensitisation kinetics
-    - Embedded functions
+    -   Recovery from desensitisation
+    - Embedded functions:
+        - Colorblind-friendly color scheme for up to 14 distinct colours.
+        - Scale bar
+        - Filtering
     
 --------------------------------LICENSE-------------------------
 Permission is hereby granted, free of charge, to any person obtaining a copy of
@@ -51,6 +57,9 @@ lmfit for parabolic curve fitting                       https://lmfit-py.readthe
 -------------------------------CREDIT----------------------------
 pyabf from Swhardan, used to import .abf (axon binary file) format
 https://github.com/swharden/pyABF/
+
+Scale bar / calibration bars use code from:
+    https://gist.github.com/dmeliza/3251476
 """
 #-----------------------------------------------------------------------------#
 #_______________________________Configuration_________________________________#
@@ -63,23 +72,34 @@ import seaborn as sns
 import scipy as sp
 import os
 print("Please set Ipython display to automatic in preferences to use interactive graphs. This will require a kernel restart and has been tested using IPython 7.13 with the Spyder IDE (4.1). This is required for interactive plotting")
-print("\n \n \n WELCOME TO JAM-PACKED 1.0. \n for Jazzy Analysis of Macroscopic responses")
+print("\n \n \n WELCOME TO EPyPhys 1.0.")
 
+plt.style.use("ggplot")
+import matplotlib.colors as mcolors
+from cycler import cycler
+colors = dict(mcolors.BASE_COLORS, **mcolors.CSS4_COLORS)
+colorlist = ['black','dimgrey','teal','darkturquoise', 'midnightblue','lightskyblue','steelblue','royalblue','lightsteelblue','darkorange', 'orange','darkgoldenrod','goldenrod','gold','khaki','yellow']
+mycycle = cycler(color=[colors[item] for item in colorlist])
+#    plt.style.use("ggplot")
+#    plt.rc('axes',prop_cycle=mycycle)
+print("\n \n Currently using ggplot as default plotting environment")
+print("Currently using EPyPhys Color Cycle: black-grey-blues-oranges-yellows")
 
 
 #_____________________________________________________________________________#
 #___________________Data import, screening, merging, and cleaning______________________#
 
-plt.style.use("ggplot")
-print("\n \n Currently using ggplot as default plotting environment")
 
-def load_data(path,panelsizein = 20,leg = False):
+
+def load_data(path,panelsizein = 20,leg = False,plot=True):
     """load_data accepts a trace files of type ABF or ABF2 for inspection
     Trace files can either be specified as a path of type(path)=str or can be 
     dragged between the open brackets.Panelsizein gives width, height of graph panel 
     in inches and is 20 by deafult. 
     
     When leg = False, no legend is plotted
+    
+    When plot = False, no graphs are returned
     
     Data is loaded into a Pandas dataframe, where the index gives the time point
     in seconds. Each column [0:end] is a successive sweep of the record.
@@ -96,6 +116,66 @@ def load_data(path,panelsizein = 20,leg = False):
             data = pd.DataFrame(data=open_tip.sweepY,index=open_tip.sweepX)
         else: # adding remaining sweeps to the DataFrame object as a new column
             data[sweepnum] = open_tip.sweepY
+    if plot:
+        # plotting figures individually to allow quality control of waves imported by inspection at sufficient resoltion ##:NB subplotting loses resolution for sweep number identification
+        figure_1,axes_1 = plt.subplots(1,figsize = (panelsizein,panelsizein)) #creation of subplots
+        #axes_1=figure_1.add_axes([1,1,1,1]) --------> deprecated
+        title1 = 'Current distribution from responses of {}'.format(path.split('/')[-1])
+        axes_1.set_title(title1)
+        data.plot.box(legend=False,ax = axes_1) # boxplots of each wave, side by side
+        fig2,axs2 = plt.subplots(figsize = [panelsizein,panelsizein])
+        for sweepNumber, value in enumerate(open_tip.sweepList):
+            open_tip.setSweep(sweepNumber)
+            axs2.plot(open_tip.sweepX,open_tip.sweepY,label = "{}".format(sweepNumber))
+            title2 = 'Overlaid Sweeps from {}'.format(path.split('/')[-1])
+            axs2.set_title(title2)
+        figure_1.show()
+        figure_1.tight_layout()
+        if leg:
+            fig2.legend()
+    print("Sampling freqency was", sampling_freq/1000,"kHz")
+    print("Data is now in DataFrame format. Remove waves with variable_name = variable_name.drop(columns = [comma-separated numbers])")
+    print("Data should be baselined before use. Type help(baseline)")
+    print("For merging data, see merge and merge_protocols")
+    print("For alignment, see align_at_t, align_at_a, or normalise_currents")
+    print("For subtracting waves, see subtract_avg")
+    return(data)
+
+def load_waves(path,panelsizein = 20,leg = False):
+    """
+    
+
+    Parameters
+    ----------
+    Loads a wave in as well as the command wave form associated abf file. 
+    If command is set manually through the amplifier, rather than driven by software command
+    then there may be no associated command wave.
+    
+    
+    path: Str
+    Path to abf file
+    panelsizein : TYPE, optional
+        Panel size in inches. Larger panels use more memory.. The default is 20.
+    leg : TYPE, optional
+        DESCRIPTION. The default is False.
+
+    Returns
+    -------
+    Data, command waves
+
+    """
+    if type(path) !=str:
+        return("A path should be specified as a string")
+    open_tip = pyabf.ABF(path)
+    sampling_freq = open_tip.dataRate # sampling rate in Hz.
+    for sweepnum in open_tip.sweepList:
+        open_tip.setSweep(sweepnum)
+        if sweepnum ==0: # initialising pandas DataFrame with indexes as times for sweep 0
+            data = pd.DataFrame(data=open_tip.sweepY,index=open_tip.sweepX)
+            com = pd.DataFrame(data=open_tip.sweepC,index=open_tip.sweepX)
+        else: # adding remaining sweeps to the DataFrame object as a new column
+            data[sweepnum] = open_tip.sweepY
+            com[sweepnum] = open_tip.sweepC
     # plotting figures individually to allow quality control of waves imported by inspection at sufficient resoltion ##:NB subplotting loses resolution for sweep number identification
     figure_1,axes_1 = plt.subplots(1,figsize = (panelsizein,panelsizein)) #creation of subplots
     #axes_1=figure_1.add_axes([1,1,1,1]) --------> deprecated
@@ -112,12 +192,19 @@ def load_data(path,panelsizein = 20,leg = False):
     figure_1.tight_layout()
     if leg:
         fig2.legend()
+    figure_3,axis_3 = plt.subplots()
+    for sweepNumber, value in enumerate(open_tip.sweepList):
+        open_tip.setSweep(sweepNumber)
+        axs2.plot(open_tip.sweepX,open_tip.sweepC,label = "{}".format(sweepNumber))
+    title3 = 'Command wave form'
+    figure_3.tight_layout()
+    return(data,com)
+    
     print("Sampling freqency was", sampling_freq/1000,"kHz")
     print("Data is now in DataFrame format. Remove waves with variable_name = variable_name.drop(columns = [comma-separated numbers])")
     print("Data should be baselined before use. Type help(baseline)")
-    print("For merging data, see merge and merge_protocols")
-    print("For alignment, see align_at_t, align_at_a, or normalise_currents")
-    print("For subtracting waves, see subtract_avg")
+    print("For examining an open tip, enter NBQX_unbinding(open_tip_variable_name,open_tip_variable_name)")
+    print("For merging data, see merge data")
     return(data)
     
 
@@ -129,7 +216,21 @@ def merge(records_to_merge_as_dataframes):
         merged = np.append(merged,item.to_numpy(),axis=1)
     record = pd.DataFrame(merged, index = records_to_merge_as_dataframes[0].index)
     return(record)
-    
+
+def flatten_sweep(sweep):
+    chained_sweeps = sweep.to_numpy().flatten('F')
+    ind = [sweep.index +(sweep.index.max()* item) for item in np.arange(sweep.shape[1])]
+    ind = np.array(ind).flatten('C').transpose()
+    flat_sweep = pd.Series(chained_sweeps,index=ind)
+    return(flat_sweep)
+
+def append_to(record,record2):
+    """Appends record2 to the end of record 1, such that the (time) index of record 2
+    is a continuation of record 1"""
+    r2s = record.index.max() # interval
+    record2.index = record2.index+r2s
+    appended = pd.concat((record,record2),axis=0)
+    return(appended)
         
 def cleaning_data(data,panelsizein=20,grpsize = 20):
     """Accepts a pandas dataframe of type produced in load_data, and returns
@@ -174,13 +275,16 @@ def baseline(response_dataframe, individual = True, end_baseline = 20):
             baselined_waves.iloc[:,item] = baselined_waves.iloc[:,item] - avg_baseline
         return(baselined_waves)
 
-def split_sweeps(response_dataframe,times_to_split):
+def split_sweeps(response_dataframe,times_to_split,t_zero=True):
     """Splits each sweep at times_to_split (ms) to return a list of size x of 
     ordered sweep fragements as dataframes. size x = size(times_to_split)+1
     
-    baselinining is performed on the wave before splitting.
+    baselining is performed on the wave before splitting.
     times to split can either be a single value or a tuple of values,
     excluding t =0 and t = max(t)
+    
+    If t_zero = True (Default, the index of each fragment is set to start at 0).
+    Else, the index retains its original value from respinse_dataframe
     
     e.g.
     first_split,window,remainder = split_sweeps(data,times_to_split = (500,800))
@@ -202,6 +306,9 @@ def split_sweeps(response_dataframe,times_to_split):
             low_threshold = times[item]
             up_threshold = times[item+1]
             fragments.append(response_dataframe[(response_dataframe.index >= low_threshold) & (response_dataframe.index <=up_threshold)])
+    if t_zero:
+        for item in np.arange(len(fragments)):
+            fragments[item].index = fragments[item].index - fragments[item].index[0]
     return(fragments)
     
 def subtract_avg(waves,waves_to_subtract):
@@ -239,6 +346,46 @@ def merge_protocols(tuple_of_dataframes):
     merged = pd.concat(tuple_of_dataframes,axis=1,keys=keys)
     merged.columns.names = 'record','sweep'
     return(merged)
+
+def align_within(record,num_events,plot=False):
+    """Aligns events within an averaged record, such that they occur at t=0.
+    
+    e.g. for alignment of multiple stimuli within an averaged sweep
+    
+    - First, sweeps are split between selected events (for each event in num events)
+    The first split occurs from t=0 to first selection.
+    The last split occurs from the last selection to t = max
+    - Then events are aligned
+    
+    - When plot= True (Default = False), plots are returned of the aligned sweeps
+    
+    nb, This differs from align_at_t: align at t is used for aligning each sweep to t=0, whereas align_within 
+    aligns multiple events within an e.g. averaged record"""
+    
+    splittimes = []
+    #splittimes.append(record.index.min()) # deprecated
+    for item in np.arange(num_events):
+        alfig,alaxs = plt.subplots()
+        alaxs.plot(record.mean(axis=1),color='black')
+        binding_id = plt.connect('motion_notify_event', on_move)
+        plt.connect('button_press_event', on_click)
+        alaxs.set_title("Left Click to select start of event {}/num_events. \nRight click to remove selection.\n Press enter when point selected".format(item))
+        alfig.tight_layout()
+        redpoints = plt.ginput(-1,0)
+        plt.close(fig=alfig)
+        points = redpoints[0][0]
+        splittimes.append(points*1000) # correcting for use in pslit_sweeps(needs ms)
+    #splittimes.append(record.index.max()) # deprecated
+    split_records = split_sweeps(record.mean(axis=1),times_to_split=splittimes,t_zero = False)
+    for item in np.arange(np.size(split_records)):
+        split_records[item].index = split_records[item].index-(split_records[item].index.min())
+    split_records.pop(0)
+    for item in split_records:
+        item.plot(color='black')
+    return(split_records)
+    ### need to decide on plot
+    # and need to remove first fragment
+        
 
 def align_at_t(data,make_zero=True):
     """Aligns each wave at a time point selected for each wave (column)
@@ -374,6 +521,18 @@ def normalise_currents(data,make01=True,poscurrent=False):
     return(normalised)
 
 
+from scipy.signal import butter, freqz, filtfilt
+
+def butter_lowpass(cutoff, fs, order=5):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='low', analog=False, fs=None)
+    return b, a
+
+def butter_lowpass_filter(x, cutoff, fs, order=5):
+    b, a = butter_lowpass(cutoff, fs, order=order)
+    return filtfilt(b, a, x)
+    
     
         
 #-----------------------------------------------------------------------------    
@@ -478,7 +637,7 @@ def NSFA_optimal(dataframe,binrange = [5,20],parabola = True,Vrev = 0,voltage = 
      # separate background from current component and thus more accurately extract fit
      # based on predicted maxima
 
-def NSFA(dataframe,num_bins = 10,Vrev = 0,parabola = True,voltage = False,open_tip_response = False,start_time = False,end_time = False,background_start = False,background_end = False,suppress_g = False):
+def NSFA(dataframe,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,open_tip_response = False,start_time = False,end_time = False,background_start = False,background_end = False,suppress_g = False,wave_check=True):
     """
     Performs Sigg (1997) style pairwise non-stationary fluctuation analysis between
     two points of interest.
@@ -513,6 +672,7 @@ def NSFA(dataframe,num_bins = 10,Vrev = 0,parabola = True,voltage = False,open_t
         be appropriate.
         Using NSFA_optimal() instead will select this number base on the minimisation
         of the fit error. 
+    voltage (mV): Default = -60. Used to calculated weighted mean single channel conductance
     Vrev : 
         Reversal potential to calculate single channel condutance. The default is 0.
     parabola : True/False
@@ -537,6 +697,7 @@ def NSFA(dataframe,num_bins = 10,Vrev = 0,parabola = True,voltage = False,open_t
         Time until which to take background interval. The default is False = 20
     suppress_g : True/False
         Suppress graphs. The default is False.
+    if wave_check = True, waves >7 RMSE are discarded
 
     Returns
     -------
@@ -567,17 +728,19 @@ def NSFA(dataframe,num_bins = 10,Vrev = 0,parabola = True,voltage = False,open_t
     if not background_end:
         background_end = 20 # baseline end in ms
     background_end = background_end/1000
+    background_start = background_start/1000
     ### find all currents in window start_time:end_time
     peak_current = dataframe.loc[start_time:end_time,:] # taking peak current for all waves
     ### Repeating background period through peak current for background at isochrone
     base = dataframe.loc[background_start:background_end,:] # get background for each wave
     
     #Heinemann and Conti verification for background and periods of interest
-    todiscardinterest = RMSDE_wave_check(peak_current)
-    todiscardbackground = RMSDE_wave_check(base)
-    to_remove = np.unique(np.append(todiscardinterest,todiscardbackground))
-    base = base.drop(columns = list(to_remove))
-    peak_current = peak_current.drop(columns = list(to_remove))
+    if wave_check:
+        todiscardinterest = RMSDE_wave_check(peak_current)
+        todiscardbackground = RMSDE_wave_check(base)
+        to_remove = np.unique(np.append(todiscardinterest,todiscardbackground))
+        base = base.drop(columns = list(to_remove))
+        peak_current = peak_current.drop(columns = list(to_remove))
     #______ --- background variance for isochrones --_____ #
     ### number of repeats of periodic baseline during peak current
     r_baseline = (peak_current.index[-1]-peak_current.index[0])/(base.index[-1]-base.index[0])
@@ -646,18 +809,25 @@ def NSFA(dataframe,num_bins = 10,Vrev = 0,parabola = True,voltage = False,open_t
         x = np.flip(x,axis=1)
         # removing current of wrong sign (e.g. +ve current in outside-out or vice versa)
         popt,pcov = sp.optimize.curve_fit(noise_func, x[:2,:], x[2,:])
-        popt = np.abs(popt) # for outside_out, making vals absolute
+        #popt = np.abs(popt) # for outside_out, making vals absolute
         # plotting fit against raw data
         if not suppress_g:
-            noise_axs.scatter(-x[0,:],noise_func(x[:2,:],-popt[0],-popt[1]),linestyle="--",color='red',label='fit,N={},i={}'.format(np.round(popt[0],2),np.round(popt[1],2)))
+            noise_axs.scatter(-x[0,:],noise_func(x[:2,:],popt[0],popt[1]),linestyle="--",color='red',label='fit,N={},i={}'.format(np.round(popt[0],2),np.round(popt[1],2)))
         #plotting errors of raw data
         # plot fit with errorbars
         # 1SD of errors
         perr = np.sqrt(np.diag(pcov))
         # using to get error of the fit
         sdefit = noise_func(x[:2,:],perr[0],perr[1])
+        N = np.abs(popt[0])
+        i = np.abs(popt[1])
+        # Nb, for outside out (-ve current)
+        P_open = np.max(-x[0,:])/(N*i)
+        # mean conductance (in pS)
+        ## ((imax / (V-Vrev))/Po)/N = y
+        y_mean = (np.max(-x[0,:])/((voltage*10**-3)-Vrev)/P_open)/N   
         if not suppress_g:
-            fit_axs.errorbar(-x[0,:],noise_func(x[:2,:],-popt[0],-popt[1]),yerr = sdefit,barsabove=True,errorevery= np.floor(np.size(currents,axis=0)/10), fmt="o",capsize = 5)
+            fit_axs.errorbar(-x[0,:],noise_func(x[:2,:],popt[0],popt[1]),yerr = sdefit,barsabove=True,errorevery= np.floor(np.size(currents,axis=0)/10), fmt="o",capsize = 5)
             fit_axs.set_title("Unbinned Fitted I vs $\sigma^2$ ")
             noise_axs.set_title("Unbinned fit vs raw data: ")
             noise_axs.set_xlim(left=0)
@@ -666,7 +836,9 @@ def NSFA(dataframe,num_bins = 10,Vrev = 0,parabola = True,voltage = False,open_t
 
     else: # if binning, bin by mean_current of isochrone
         # such that each bin ctributes to amplitude of current equally.
-        x = (np.vstack((mean_isochrone_current,background,variance))).transpose()        
+        x = (np.vstack((mean_isochrone_current,background,variance))).transpose()  
+        if np.any(np.isnan(background))==True:
+            x[:,1] = 0 #### catch cases wher ebackground not there
         x = pd.DataFrame(x)
         x.index = peak_current.index
         x[3] = pd.cut(x[0],num_bins)
@@ -675,24 +847,22 @@ def NSFA(dataframe,num_bins = 10,Vrev = 0,parabola = True,voltage = False,open_t
         x = (x.to_numpy()).transpose()
         x = np.flip(x,axis=1)
         popt,pcov = sp.optimize.curve_fit(noise_func, x[:2,:], x[2,:])
-        popt = np.abs(popt) # for outside_out, making vals absolute
+        #popt = np.abs(popt) # for outside_out, making vals absolute
         # plotting the fit 
         perr = np.sqrt(np.diag(pcov))
         # inverting current to get region of interest
         if not suppress_g:
-            noise_axs.scatter(x = -x[0,:],y = noise_func(x[:2,:],-popt[0],-popt[1]),linestyle="--",color='red',label='fit,N={},i={}'.format(np.round(popt[0],2),np.round(popt[1],2)))
+            noise_axs.scatter(x = -x[0,:],y = noise_func(x[:2,:],popt[0],popt[1]),linestyle="--",color='red',label='fit,N={},i={}'.format(np.round(popt[0],2),np.round(popt[1],2)))
             noise_axs.set_title("Binned fit (nbins={}) vs raw data".format(num_bins))
             noise_axs.set_xlim(left = 0)
             noise_axs.set_ylim(bottom = 0)
 
         sdefit = noise_func(x[:2,:],perr[0],perr[1])
         if not suppress_g:
-            fit_axs.errorbar(np.abs(-x[0,:]),np.abs(noise_func(x[:2,:],-popt[0],-popt[1])),yerr = sdefit,barsabove=True, fmt="o",capsize = 5,color='black')
+            fit_axs.errorbar(np.abs(-x[0,:]),np.abs(noise_func(x[:2,:],popt[0],popt[1])),yerr = sdefit,barsabove=True, fmt="o",capsize = 5,color='black')
             fit_axs.set_title("Binned fit +- 1SD Errors of fit")
             fit_axs.set_xlim(left = 0)
             fit_axs.set_ylim(bottom = 0)
-
-
     if parabola:
         if not suppress_g:
             parabfig,parabaxs = plt.subplots()
@@ -703,8 +873,8 @@ def NSFA(dataframe,num_bins = 10,Vrev = 0,parabola = True,voltage = False,open_t
             sim_current = np.linspace(max_current,2*max_current,np.size(x[0,:]))
             # need to simulate the variance for greater current values
             sim_curr_back = np.vstack((sim_current,x[1,:]))
-            parabaxs.scatter(-x[0,:],noise_func(x[:2,:],-popt[0],-popt[1]),label = 'Parabolic fit to data',color='black')
-            parabaxs.plot(-sim_current,noise_func(sim_curr_back,-popt[0],-popt[1]),linestyle="--",color='red',label='fit of noise parabola to simulated data,N={},i={}'.format(np.round(popt[0],2),np.round(popt[1],2)))
+            parabaxs.scatter(-x[0,:],noise_func(x[:2,:],popt[0],popt[1]),label = 'Parabolic fit to data',color='black')
+            parabaxs.plot(-sim_current,noise_func(sim_curr_back,popt[0],popt[1]),linestyle="--",color='red',label='fit of noise parabola to simulated data,N={},i={}'.format(np.round(popt[0],2),np.round(popt[1],2)))
             parabaxs.legend()
             parabaxs.set_title("Fit of simulated and experimental data")
             parabaxs.set_ylim(bottom=0)
@@ -712,26 +882,135 @@ def NSFA(dataframe,num_bins = 10,Vrev = 0,parabola = True,voltage = False,open_t
             parabfig.tight_layout()
             # simulating data for rest of curve
     SD_errors = np.sqrt(np.diag(pcov))
-    N = popt[0]
-    i = popt[1]
+    N = np.abs(popt[0])
+    i = np.abs(popt[1])
+    # Nb, for outside out (-ve current)
     P_open = np.max(-x[0,:])/(N*i)
+    # mean conductance (in pS)
+    ## ((imax / (V-Vrev))/Po)/N = y
+    y_mean = (np.max(-x[0,:])/((voltage*10**-3)-Vrev)/P_open)/N   
+    
+    pubfig,pubaxs = plt.subplots()
+    pubaxs.plot(np.abs(-x[0,:]),np.abs(noise_func(x[:2,:],popt[0],popt[1]))-np.abs(x[1,:]),color='black',Label = 'Fit')
+    pubaxs.scatter(np.abs(-x[0,:]),x[2,:]-x[1,:],color ='midnightblue',marker='.',label="Binned Data")
+    pubaxs.grid(False)
+    pubaxs.set_xlabel("I")
+    pubaxs.set_ylabel("$\sigma^2$ (pA$^2$)")
+    #pubaxs.set_facecolor("white")
+    pubaxs.annotate("{}pS".format(np.abs(np.round(y_mean,2))),xycoords = 'figure fraction',xy=[0.5,0.9])
+    # if parabola:
+    #     max_current = -(np.max(-x[0,:]))
+    #     sim_current = np.linspace(max_current,100*max_current,np.size(x[0,:]))
+    #     # need to simulate the variance for greater current values
+    #     sim_curr_back = np.vstack((sim_current,x[1,:]))
+    #     pubaxs.plot(-sim_current,noise_func(sim_curr_back,popt[0],popt[1]),linestyle="--",color='black',label='Extrapolated Fit')
+    #     pubaxs.set_ylim(bottom=0)
+    #     pubaxs.set_xlim(left=0)
+    pubfig.legend(loc=[0.75,0.85])
+    pubfig.tight_layout()
     if not suppress_g:
         noise_axs.legend()
         raw_axs.legend()
         noise_fig.tight_layout()
         raw_fig.tight_layout()
         fit_fig.tight_layout()
-        print("Waves {} were removed (background or ROI > 7RMSE)".format(to_remove))
+        if wave_check:
+            print("Waves {} were removed (background or ROI > 7RMSE)".format(len(to_remove)))
         if not voltage:
             print('Fitted N = {} +-{},i = {} +-{},P_open = {}'.format(np.round(N,2),np.round(SD_errors[0],2),np.round(i,2),np.round(SD_errors[1],2),np.round(P_open,2)))
         else:
             g = i/(voltage-Vrev)
-            print('Fitted N = {} +-{},i = {} +-{},P_open = {},gamma_mean = {}'.format(np.round(N,2),np.round(SD_errors[0],2),np.round(i,2),np.round(SD_errors[1],2),np.round(P_open,2),np.round(g,2)))
+            print('Fitted N = {} +-{},i = {} +-{},P_open = {},gamma_mean = {}'.format(np.round(N,2),np.round(SD_errors[0],2),np.round(i,2),np.round(SD_errors[1],2),np.round(P_open,2),np.round(y_mean,2)))
         if not parabola:
             print("If you wish to extend the parabola, call again with parabola = True. This can be useful to see whether a fit is adequate, and is particularly useful after binning")
-        return(N,i,P_open,to_remove)
+            
+        return(N,i,P_open,y_mean)
     else:
-        return(N,i,P_open,SD_errors)
+        return(N,i,P_open,y_mean,SD_errors)
+    
+def recovery_from(record,num_events=8):
+    """Accepts an averaged, baselined record and calculates the time constant for the recovery
+    from desensitisation. A number of events are accepted, as well as a record max
+    
+    Alignment is performed during execution.
+    
+    num_events = number of paired pulse repeats. Default = 8
+    
+    returns A,Tau,fractional peak recovery
+    
+    where fractional peak recovery is a pandas series containing the (negative)
+    amplitudes of the second pulse normalised to the first pulse.
+    """
+    
+    
+    print("final event is record max")
+    aligned_record = align_within(record=record,num_events=num_events)
+    aligned_record.pop(-1)
+    recfig,recaxs = plt.subplots()
+    for item in aligned_record:
+        recaxs.plot(item,color='black')
+    binding_id = plt.connect('motion_notify_event', on_move)
+    plt.connect('button_press_event', on_click)
+    recaxs.set_title("Left click to select a time point \n just before the second pulse of the first pair (baseline)")
+    recfig.tight_layout()
+    points = plt.ginput(-1,0)
+    plt.close(fig=recfig)
+    baseline_t = points[0][0]
+    baseline_scale = points[0][1]
+    recfig,recaxs = plt.subplots()
+    for item in aligned_record:
+        recaxs.plot(item,color='black')
+    binding_id = plt.connect('motion_notify_event', on_move)
+    plt.connect('button_press_event', on_click)
+    recaxs.set_title("Left click to select a time point \n just after the final paired pulse")
+    recfig.tight_layout()
+    points = plt.ginput(-1,0)
+    plt.close(fig=recfig)
+    end_t = points[0][0]
+    norm_pp = []
+    second_pulse_peak_amplitude = []
+    second_pulse_peak_t = []
+    ### normalise each second pulse of pair to first
+    # and get the second pulse amplitude
+    for item in aligned_record:
+        norm_pp.append(-(item/item.min()))
+        second_pulse_peak_amplitude.append((-item/item.min()).loc[(item/item.min()).index[(-(item/item.min())).index >= baseline_t].min():].min())
+        second_pulse_peak_t.append((-item/item.min()).loc[(item/item.min()).index[(-(item/item.min())).index >= baseline_t].min():].idxmin())
+    recovery_frame = pd.DataFrame(second_pulse_peak_amplitude,index=second_pulse_peak_t)
+    print("select a time point before and then a second after the data points")
+    recfig,recaxs = plt.subplots()
+    for item in norm_pp:
+        recaxs.plot(item,color='black')
+    # recaxs.plot(norm_pp[0],color='black')
+    # recaxs.plot(norm_pp[1],color='black')
+    # recaxs.plot(norm_pp[2],color='black')
+    # recaxs.plot(norm_pp[3],color='black')
+    # recaxs.plot(norm_pp[4],color='black')
+    # recaxs.plot(norm_pp[5],color='black')
+    # recaxs.plot(norm_pp[6],color='black')
+    A,Tau = exp_fitter(recovery_frame,double=False,fitflag=False)
+        
+    recaxs.set_title("Normalised recovery, Tau = {}".format(Tau))
+    
+    ### cna then scale data by peak current of first pulse = aligned_record.min()
+    ### which doesn't matter, as when add scalebar, lose axis, so can just multiply by 
+    # and then add scale bar
+    
+    ## then scaling the plot back into pA 
+    rec2fig,rec2axs = plt.subplots()
+    for item in np.arange(np.size(recaxs.get_lines())):
+        xcoords = recaxs.get_lines()[item].get_xdata()
+        ycoords = recaxs.get_lines()[item].get_ydata()
+        if item == np.arange(np.size(recaxs.get_lines()))[-1]:
+            rec2axs.plot(xcoords,-(ycoords*aligned_record[0].min()),color='red',linestyle="--")
+        else:
+            rec2axs.plot(xcoords,-(ycoords*aligned_record[0].min()),color='black')
+    rec2axs.grid(False)
+    rec2axs.set_facecolor("white")
+    add_scalebar(rec2axs,loc="lower right")
+    rec2fig.tight_layout()
+    print("Current of amplitude {} recovered from desensitisation with Tau ={}".format(aligned_record[0].min(),Tau))
+    return(aligned_record[0].min(),Tau,recovery_frame)
 
 
 def NBQX_unbinding(dataframe,open_tip_response,give_onset = False,onset_lo_lim =False,onset_up_lim=False,give_peak = False):
@@ -836,9 +1115,19 @@ def NBQX_unbinding(dataframe,open_tip_response,give_onset = False,onset_lo_lim =
     hhfitaxis3.plot(1000*(np.array(peak_current.index-onset)),np.array(peak_current.mean(axis=1)),color='grey',label = "Mean Current (unbinned)")
     hhfitaxis3.plot(1000*(np.array(binned_peak.index)),H_H_monofit_NBQX(x,popt)+onset_current,linestyle = "--",color='red',label = "fit:m={}".format(np.round(popt[0],2)))
     hhfitaxis3.legend()
+
     hhfitfig1.tight_layout()
     hhfitfig2.tight_layout()
     hhfitfig3.tight_layout()
+    
+    hhfitfig4,hhfitaxis4 = plt.subplots()
+    hhfitaxis4.plot(1000*(np.array(peak_current.index-onset)),np.array(peak_current.mean(axis=1)),color='black',label = "Data")
+    hhfitaxis4.plot(1000*(np.array(binned_peak.index)),H_H_monofit_NBQX(x,popt)+onset_current,linestyle = "--",color='red',label = "fit")
+    hhfitaxis4.grid(False)
+    add_scalebar(hhfitaxis4,loc='center right')
+    hhfitfig4.tight_layout()
+
+    
     print(" \n \n \n \n  \n \n \n \n \n mean peak current =",binned_peak.min()[0],"(pA)",",T = ",Tau_unbinding,"(s)",",m = ",popt[0], ",10-90 = ",((peak-onset)*0.9) - ((peak-onset)*0.1),"(s)")
     print("{} empty bins were removed.".format(dropped_cols))
     return(binned_peak.min(),Tau_unbinding,popt,((peak-onset)*0.9) - ((peak-onset)*0.1)) # returning mean peak current, Tau_unbinding, m, and 10-90 rise time
@@ -926,11 +1215,19 @@ def current_decay(dataframe,two_components=False):
         return(popt[0]*10**3)
     
 
-def exp_fitter(pandas_structure, double = False):
+def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,show_components=False):
     """Fits an exponential or sum of expontials to pandas structure data (either dataframe or series).
     If DataFrame is used, the fit is performed to the average of all waves
     
     if double = True (Default = False), fits a double exponential
+    
+    fitflag = True, the fit is plotted against the data
+    
+    if B_seed value is set to a value, this will be used to seed the double exponential
+        and the vlaue for the peak current will be used to seed A (detected)
+    
+    if show_component = True, the components of the double exponential will
+    also be plotted
     
     if the beginning of the fit is more positive than the end, a negative exponential or sum of, is fitted"""
     if len(pandas_structure.shape) == 2: #if dataframe
@@ -945,28 +1242,42 @@ def exp_fitter(pandas_structure, double = False):
         It= pandas_structure[(pandas_structure.index>=start_fit[0]) & (pandas_structure.index <=end_fit[0])]
         x = np.zeros([2,np.size(It.index)]) # normalise current
         x[0,:] = It.index-It.index[0] #t, starting at 0
-        x[1,:] = It #current
+        x[1,:] = It - It.iloc[-1] #current
         if end_fit[1] > start_fit[1]:# condition to fit positive exponential
             #p0 = (times[-1]/It.iloc[0])/(np.log(Imax)) # estimate Tau
             posmonoexp = lambda x,a,tau: a*(np.exp(x[0,:]/tau))
             #if np.isinf(p0) is True:
-            popt,_ = sp.optimize.curve_fit(posmonoexp,x,x[1,:])
+            popt,pcov = sp.optimize.curve_fit(posmonoexp,x,x[1,:])
             mtype = "positive"
-            plt.plot(x[0,:]+It.index[0],posmonoexp(x,popt[0],popt[1]),linestyle ='--',color='red',label = 'fit')
+            if fitflag:
+                plt.plot(x[0,:]+It.index[0],posmonoexp(x,popt[0],popt[1])+It.iloc[-1],linestyle ='--',color='red',label = 'fit')
             plt.plot(It.index,It,color='black',label='data')
+            
         else: # or else, fit negative exponential
             #p0 = -(It.index[-1]/It.iloc[-1])/(np.log(Imax)) #deprecated together with np.isinf codition. No initial guess now provided
             negmonoexp = lambda x,a,tau: a*(np.exp(-x[0,:]/tau))
-            popt,_ = sp.optimize.curve_fit(negmonoexp,x,x[1,:])
+            popt,pcov = sp.optimize.curve_fit(negmonoexp,x,x[1,:])
             mtype = "negative"
-            plt.plot(x[0,:]+It.index[0],negmonoexp(x,popt[0],popt[1]),linestyle ='--',color='red',label = 'fit')
+            if fitflag:
+                 plt.plot(x[0,:]+It.index[0],negmonoexp(x,popt[0],popt[1])+It.iloc[-1],linestyle ='--',color='red',label = 'fit')
             plt.plot(It.index,It,color='black',label= 'data')
-        # get Tau and a real units:
-        Tau = (It.index.max()-It.index.min())/popt[1]
-        a = popt[0]*(It.index.min()/(It.index.max()-It.index.min()))
-        print("A {} monoexponential function was fitted,a={},Tau = {}".format(mtype,a,Tau))
+           
+            
+# =============================================================================
+# #Deprecated: see warning in double exp fit
+
+        #Tau = (It.index.max()-It.index.min())/popt[1]
+        #a = popt[0]*(It.index.min()/(It.index.max()-It.index.min()))
+        #print("A {} monoexponential function was fitted,a={},Tau = {}".format(mtype,a,Tau))
+        
+        #nb, returns were also changed
+# partially reinstated 160321: returning abolsute Tau, and A 
+        Tau = np.abs(popt[1])
+# =============================================================================
+        print("A {} monoexponential function was fitted,a={} from fit end,Tau = {}".format(mtype,popt[0],Tau))
         plt.show()
-        return(a,Tau)
+        print("1SD errors = {}".format(np.sqrt(np.diag(pcov))))
+        return(popt[0],Tau)
     if double:
         start_fit = get_component(pandas_structure,'start of the fast')
         #start_slow = get_component(pandas_structure,'start of the slow')
@@ -979,31 +1290,126 @@ def exp_fitter(pandas_structure, double = False):
         # x[0,:] = It.iloc[0]# a # deprecated: fit better without entering a,b
         # x[1,:] = start_slow[1] #b
         x[0,:] = It.index - It.index.min() # t normalised such that t=0 at first time point
-        x[1,:] = It # current
+        x[1,:] = It - It.iloc[-1] # current
         if end_fit[1]>start_fit[1]: # condition fit positive exponential
              posdouble_exp = lambda x,a,b,taufast,tauslow: (a*(np.exp(x[0,:]/taufast)))+(b*(np.exp(x[0,:]/tauslow)))
-             popt,_ = sp.optimize.curve_fit(posdouble_exp,x,x[1,:])
+             if np.any(B_seed_val):
+                 popt,pcov = sp.optimize.curve_fit(posdouble_exp,x,x[1,:],p0=[x[1,0],B_seed_val,1,1])
+             else:
+                 popt,pcov = sp.optimize.curve_fit(posdouble_exp,x,x[1,:])
              mtype = "positive"
-             plt.plot(x[0,:]+It.index.min(),posdouble_exp(x,popt[0],popt[1],popt[2],popt[3]),linestyle ="--",color='red',label = 'Fit')
              plt.plot(x[0,:]+It.index.min(),x[1,:],color='black',label = "Data")
+             if fitflag:
+                 plt.plot(x[0,:]+It.index.min(),posdouble_exp(x,popt[0],popt[1],popt[2],popt[3]+It.iloc[-1]),linestyle ="--",color='red',label = 'Fit')
+             if show_components:
+                 posmonoexp = lambda x,a,tau: a*(np.exp(x[0,:]/tau))
+                 plt.plot(x[0,:]+It.index.min(),posmonoexp(x, popt[0], popt[2]),label='Fast component',color='lightskyblue',linestyle="--")
+                 plt.plot(x[0,:]+It.index.min(),posmonoexp(x, popt[1], popt[3]),label='Slow component',color='royalblue',linestyle="--")
              plt.legend()
         else:
              negdouble_exp = lambda x,a,b,taufast,tauslow: (a*(np.exp(-x[0,:]/taufast)))+(b*(np.exp(-x[0,:]/tauslow)))
-             popt,_ = sp.optimize.curve_fit(negdouble_exp,x,x[1,:])
+             if np.any(B_seed_val):
+                 popt,pcov = sp.optimize.curve_fit(negdouble_exp,x,x[1,:],p0=[x[1,0],B_seed_val,1,1])
+             else:
+                 popt,pcov = sp.optimize.curve_fit(negdouble_exp,x,x[1,:])
              mtype = "negative"
-             plt.plot(x[0,:]+It.index.min(),negdouble_exp(x,popt[0],popt[1],popt[2],popt[3]),linestyle ="--",color='red',label = 'Fit')
-             plt.plot(x[0,:]+It.index.min(),x[1,:],color='black',label = "Data")
+             plt.plot(x[0,:]+It.index.min(),x[1,:]+It.min(),color='black',label = "Data")
+             if fitflag:
+                 plt.plot(x[0,:]+It.index.min(),negdouble_exp(x,popt[0],popt[1],popt[2],popt[3])+It.iloc[-1],linestyle ="--",color='red',label = 'Fit')
+             if show_components:
+                 negmonoexp = lambda x,a,tau: a*(np.exp(-x[0,:]/tau))
+                 plt.plot(x[0,:]+It.index.min(),negmonoexp(x, popt[0], popt[2]),label='Fast component',color='lightskyblue',linestyle="--")
+                 plt.plot(x[0,:]+It.index.min(),negmonoexp(x, popt[1], popt[3]),label='Slow component',color='royalblue',linestyle="--")
              plt.legend()
         # correcting time constant and amplitude values for their real domain
-        A = popt[0]*np.exp((It.index.min()/(It.index.max()-(It.index.min())))/popt[2])
-        B = popt[1]*np.exp((It.index.min()/(It.index.max()-(It.index.min())))/popt[3])
-        Taufast = (It.index.max()-It.index.min()) * popt[2]
-        Tauslow = (It.index.max()-It.index.min()) * popt[3]
+# =============================================================================
+# Deprecated: chnaging popt to their domain
+       # A = popt[0]*np.exp((It.index.min()/(It.index.max()-(It.index.min())))/popt[2])
+       # B = popt[1]*np.exp((It.index.min()/(It.index.max()-(It.index.min())))/popt[3])
+        #Taufast = (It.index.max()-It.index.min()) * popt[2]
+        #Tauslow = (It.index.max()-It.index.min()) * popt[3]
+        #weightedtau = (Taufast*(A/(A+B))) + (Tauslow*(B/(A+B)))
+        #print("A sum of {} exponentials was fitted. A = {}, B = {}, Taufast = {},Tauslow={}".format(mtype,A,B,Taufast,Tauslow))
+        
+        # nb, return was changed to give *popt
+        # monexpon was also changed
+######===========================================######
+# reinstated partially: 160321:
+    #returning tau as absolute value
+    # returning absolute value of A, rather than relative to B
+        A = popt[1] + popt[0]
+        B = np.abs(popt[1])
+        Taufast = np.abs(popt[2])
+        Tauslow =  np.abs(popt[3])
         weightedtau = (Taufast*(A/(A+B))) + (Tauslow*(B/(A+B)))
-        print("A sum of {} exponentials was fitted. A = {}, B = {}, Taufast = {},Tauslow={}".format(mtype,A,B,Taufast,Tauslow))
+# =============================================================================
+        #weightedtau = (popt[2]*(popt[0]/(popt[0]+popt[1]))) + (popt[3]*(popt[1]/(popt[0]+popt[1])))
         print("The weighted time constant is = {}".format(weightedtau))
+        print("A sum of {} exponentials was fitted. A = {} from fit end, B = {}, Taufast = {},Tauslow={}".format(mtype,A,B,Taufast,Tauslow))
+        print("1SD errors = {}".format(np.sqrt(np.diag(pcov))))
         plt.show()
-        return(popt[0],popt[1],popt[2],popt[3],weightedtau)
+        return(A,B,Taufast,Tauslow,weightedtau)
+##### Here,
+    # so fit is great, but output time constants is shit (which means that weighted is shit)
+        # think because they aren't on the same scale!
+            # get tau scale as fitted tau * (tfinal-tzero)
+    # need to add axis labels to plots.
+#____________________________________________________________________________#
+#----------------------------- Data Saving ----------------------------------#
+
+
+rootpath = os.path.dirname(os.path.realpath(__file__)) # getting module root
+##### setting up file storage and analysis method logging
+print("\n \n \n Outputs will be saved to: {}".format(rootpath))
+for root,dirs,files in os.walk(rootpath):
+    if "JAMPACK_Log.csv" in files:
+        savepath = rootpath + '/JAMPACK_log.csv'
+        print('JAMPACK log exists and will be updated on instances of save_file()')
+    else:
+        with open("JAMPACK_log.csv","w") as savepath:
+            savepath = rootpath +'/savepath.name'
+            print('JAMPACK log has been created. This message will not be repeated.')
+            pass
+
+def setup_saving():
+    setup_saving.on = True
+
+setup_saving() # turning on ability to save when script run
+
+def save_file(kwargs): # giving option to save global environment from an analyses
+    """Stores the output of a function called in kwargs to the JAMPACK_Log.csv
+    
+    usage example:
+        save_file(NBQX_unbinding(dataframe,open_tip response))"""
+    if setup_saving.on:
+        save_file.apply_saving = True
+        save_file.experiment_id = input("Input the experiment ID >")
+    
+# for each function, write a save file portion using flags from save_file that is used when save_file.apply_saving  = True:
+    # experiment_id [done, in save_file]
+    # File_id [from import], ability to add multiple/ overwrite
+    # condtion, needs to be entered... this one tricky
+    # patch_id [from history], just numbering 1-n
+    # protocol_id [from anaysis method selected]
+    # stats [from protocol] used, key should say what the stats are:
+    # Info: if baselining, if cleaned etc.
+    # graphs path: for each graph,what is the path to it inside a created graphs folder
+
+# save all as dictionary:
+    # can use dir(save_file) to get list of methods associated with save_file object
+        # my contain apply, so can save those methods that contain apply
+    
+# may be easier to have sep function for open_tip to give the flag
+
+# at moment, for each root/dirs, JAMPACK created when its not in that root.
+
+
+# Then need open_records, which should:
+    # import dictionary
+    # return list of keys for each 'column' identifier
+# Then user can filter data
+# and have function that will take this dictionary and return it as pandas dataframe.
+
 
 
 #____________________________________________________________________________#
@@ -1268,3 +1674,156 @@ def parabola(x,a,b,c):
     if not c:
         c = 0
     return((a*x**2)+(b*x)+c)
+
+
+
+
+from matplotlib.offsetbox import AnchoredOffsetbox
+class AnchoredScaleBar(AnchoredOffsetbox):
+    def __init__(self, transform, sizex=0, sizey=0, labelx=None, labely=None, loc=4,
+                 pad=0.1, borderpad=0.1, sep=2, prop=None, barcolor="black", barwidth=None, 
+                 **kwargs):
+        """
+        Draw a horizontal and/or vertical  bar with the size in data coordinate
+        of the give axes. A label will be drawn underneath (center-aligned).
+        - transform : the coordinate frame (typically axes.transData)
+        - sizex,sizey : width of x,y bar, in data units. 0 to omit
+        - labelx,labely : labels for x,y bars; None to omit
+        - loc : position in containing axes
+        - pad, borderpad : padding, in fraction of the legend font size (or prop)
+        - sep : separation between labels and bars in points.
+        - **kwargs : additional arguments passed to base class constructor
+        """
+        from matplotlib.patches import Rectangle
+        from matplotlib.offsetbox import AuxTransformBox, VPacker, HPacker, TextArea, DrawingArea
+        bars = AuxTransformBox(transform)
+        if sizex:
+            bars.add_artist(Rectangle((0,0), sizex, 0, ec=barcolor, lw=barwidth, fc="none"))
+        if sizey:
+            bars.add_artist(Rectangle((0,0), 0, sizey, ec=barcolor, lw=barwidth, fc="none"))
+
+        if sizex and labelx:
+            self.xlabel = TextArea(labelx, minimumdescent=False)
+            bars = VPacker(children=[bars, self.xlabel], align="center", pad=0, sep=sep)
+        if sizey and labely:
+            self.ylabel = TextArea(labely)
+            bars = HPacker(children=[self.ylabel, bars], align="center", pad=0, sep=sep)
+
+        AnchoredOffsetbox.__init__(self, loc, pad=pad, borderpad=borderpad,
+                                   child=bars, prop=prop, frameon=False, **kwargs)
+
+        
+def add_scalebar(ax, matchx=True, matchy=True, hidex=True, hidey=True, **kwargs):
+    """ Add scalebars to axes
+    Adds a set of scale bars to *ax*, matching the size to the ticks of the plot
+    and optionally hiding the x and y axes
+    - ax : the axis to attach ticks to
+    - matchx,matchy : if True, set size of scale bars to spacing between ticks
+                    if False, size should be set using sizex and sizey params
+    - hidex,hidey : if True, hide x-axis and y-axis of parent
+    - **kwargs : additional arguments passed to AnchoredScaleBars
+    Returns created scalebar object
+    """
+    def f(axis):
+        l = axis.get_majorticklocs()
+        return len(l)>1 and (l[1] - l[0])
+    
+    if matchx:
+        kwargs['sizex'] = f(ax.xaxis)
+        kwargs['labelx'] = str(kwargs['sizex'])
+    if matchy:
+        kwargs['sizey'] = f(ax.yaxis)
+        kwargs['labely'] = str(kwargs['sizey'])
+        
+    sb = AnchoredScaleBar(ax.transData, **kwargs)
+    ax.add_artist(sb)
+
+    if hidex : ax.xaxis.set_visible(False)
+    if hidey : ax.yaxis.set_visible(False)
+    if hidex and hidey: ax.set_frame_on(False)
+
+    return sb
+
+    
+# v_unblock analysis
+# align in t, align in a
+# normalise
+# fit sum of exponentials to each voltage (Tau unblock) using exp_fitter
+# plot an intercept at y = max normalised current (1)
+# simulate additional points and find when each exponential crosses one
+# difference between these intercepts = dTau/dVoltage
+
+## change log:
+    
+    # 290521: added catch-all to NSFA for when background =0
+    
+    #270521: added filtering function
+    # added pub quality image to noise
+    
+    #240521: modified exp fitter so that B in own domain to correctly give weightedtau
+    
+    #110521: NSFA plotting fixed: should check how fitting error plotted.
+    
+    #270421: added show components for double exp in exp fitter
+    
+    #230421: added ability to seed values for exp_fitter double exponentials.
+    
+    # 1704: in noise analysis: lines 720-724, which requirethe time interval of background 
+    # to be smaller than the noise fit time period. Should fix.
+    
+    #130421:
+        # added append_to function
+        # added align_within function - nb difference to align_at_t
+        # added recovery from desensitisation
+    
+    # 060421:
+        # changed split sweeps give option to reindex from 0
+        # in NBQX unbinding, now returns with calibration bar
+    
+    # 160321:
+        # also reinstated A and B values back into their own domain for Double, where A = B + A
+        # but think for negative exponential, i need to remove the +It[-1], and change to the proper transform
+            # think just for the grapj
+    
+    #140321:
+        # Deprecated changing fitted values in exp fitter back into their own domain
+    
+    #130321:
+        #added flatten_sweeps, which joins all sweeps into a single, long sweep
+        #changed order of plotting for exp_fitter
+    
+    #070221:
+        # replaced mono_exp_fitter with much more stable (and more general) exp_fitter function
+        # but has not quite made current_decay function defunct.
+    
+    #050220:
+    # implemented normalise_currents function
+    #  when using graph interaction, set ginput to -1, and give user instructions to right click to remove last 
+    #and press enter when happy with selection.
+    # then we can zoom, delete false points, and hit enter when final selection made
+    
+    #020221:
+        #implemented align_at_t and align_at_a
+    
+    
+    # 230121:
+        # implemented import of data and command wave
+        # load_waves function - need to work out why doesn't load commmand
+
+         # ---- Graphs to produce: perhaps as styles?
+             
+         # experimental traces: 
+         #     - Deactivation and Desensitisation kinetics: think also using hodkin and huxley type equations
+         #     - Voltage ramp: i/v curve, RI etc.
+          # in top plot, and in bottom, we show that wave in red vs mean in grey.
+     
+         
+#__________ useful notes:
+ # to create a range of numbers as form string, string_of = [str(i).zfill(1) for i in range(0,64).            
+            
+ # Scaling algorithmfrom molecular devices. Necessary data cab be accessed through myabfvariablename.headertext.splitlines() etc.
+ # The algorithm is: (DataPoint - fInstrumentOffset + fSignalOffset) * fInstrumentScaleFactor * fSignalGain * fADCProgrammableGain) * (lADCResolution / fADCRange)
+ 
+
+    
+#     return()
