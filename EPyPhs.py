@@ -527,8 +527,6 @@ def butter_lowpass_filter(x, cutoff, fs, order=5):
     b, a = butter_lowpass(cutoff, fs, order=order)
     return filtfilt(b, a, x)
     
-    
-        
 #-----------------------------------------------------------------------------    
 #######_________________________ANALYSIS METHODS_________________________#####
 
@@ -625,16 +623,18 @@ def NSFA_optimal(dataframe,binrange = [5,20],parabola = True,Vrev = 0,voltage = 
     print("optimal Nbins = ",num_bins[0])
     N,i,P_open,removed = NSFA(dataframe,num_bins = num_bins[0],parabola = True, Vrev=Vrev,voltage = voltage,start_time = start_time,end_time = end_time,background_start = background_start, background_end = background_end,suppress_g =False)
     return(N,i,P_open,removed)
+
+##### here:
+# fix noise func optimal
+# add cov analysis
     
 
 #### Might also try a Gaussian regression noise analysis, which may be able to
      # separate background from current component and thus more accurately extract fit
      # based on predicted maxima
 
-
-def NSFA(dataframe,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,open_tip_response = False,start_time = False,end_time = False,background_start = False,background_end = False,suppress_g = False,wave_check=True,fix_N = False,fix_i = False,return_var = False):
-    """
-    Performs Sigg (1997) style pairwise non-stationary fluctuation analysis between
+def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,start_time = False,end_time = False,background_start = False,background_end = False,suppress_g = False,wave_check=False,alignment = True,return_var = False):
+    """    Performs Sigg (1997) style pairwise non-stationary fluctuation analysis between
     two points of interest.
     
     A Heinemann and Conti, 1997 QC check is performed, and any waves with
@@ -683,6 +683,7 @@ def NSFA(dataframe,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,open_tip_r
     start_time (s) : 
         Start time for interval in which to perform pairwise analysis. When
         False, user is asked to select from graph. The default is False.
+        This should include the current rise time if alignment is True
     end_time (s) : T
         End time for interval in which to perform pairwise analysis. When
         False, user is asked to select from graph. The default is False.
@@ -690,12 +691,19 @@ def NSFA(dataframe,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,open_tip_r
         Time from which to take background interval. The default is False = 0.
     background_end (ms)
         Time until which to take background interval. The default is False = 20
-    suppress_g : True/False
-        Suppress graphs. The default is False.
-    if wave_check = True, waves >7 RMSE are discarded
+    suppress_g : True/False: Suppress graphs when True. The default is False.
+
+
+    ------ Important optional arguments -------
+    Alignment:True/False: When True, alignment performed on 90% current rise. Default = True.
+        When True, the ROI should include the current rise. When False, should not.
     
-    if not fix_N, fix_i, Po is calculated from max peak current/estimated N * estimated i
-    if either of these arguments are given a value, then that will be used to estimate Po
+    pairwise:True/False: When True, performs Sigg, 1997 noise abalysis where the variance is calculated
+        between wave pairs. A parabolic function is then fitted to discretised isochronal paired mean and variance values.
+        Otherwise (False), the parabola is fitted using discretised values of current and varaince across the isochrone for all waves.
+        
+    if wave_check = True, waves >7 RMSE are discarded
+
 
     Returns
     -------
@@ -711,14 +719,9 @@ def NSFA(dataframe,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,open_tip_r
         Graph 3: The binned fit + 1SD errors of fit
         Graph 4: If Parabola = True, then the fit is extended beyond the dataset.
                 See Parbola arg
-
-    """
-    ### config ###
+                """
     if not start_time: # if no start time is provided, see if an open-tip-response dataframe was given
-        if not np.any(open_tip_response): # if not, allow onset time selection from experimental record
             start_time = get_open_tip_onset(dataframe)
-        else:
-            start_time = get_open_tip_onset(open_tip_response)
     if not end_time: # if no peak time is specified
         end_time = get_peak(dataframe) # obtained from graph
     if not background_start:
@@ -727,33 +730,63 @@ def NSFA(dataframe,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,open_tip_r
         background_end = 20 # baseline end in ms
     background_end = background_end/1000
     background_start = background_start/1000
+    # fix background > start time
+    if (background_end>start_time) & (background_start<start_time):
+        background_end = start_time - start_time/1000
+    
     ### find all currents in window start_time:end_time
     peak_current = dataframe.loc[start_time:end_time,:] # taking peak current for all waves
+    # peak current is now aligned to first time point = or > 90% rise
+    
+    # need to account for that in baseline.
     ### Repeating background period through peak current for background at isochrone
     base = dataframe.loc[background_start:background_end,:] # get background for each wave
     
-    #Heinemann and Conti verification for background and periods of interest
-    if wave_check:
-        todiscardinterest = RMSDE_wave_check(peak_current)
-        todiscardbackground = RMSDE_wave_check(base)
-        to_remove = np.unique(np.append(todiscardinterest,todiscardbackground))
-        base = base.drop(columns = list(to_remove))
-        peak_current = peak_current.drop(columns = list(to_remove))
+    # drop base < 90% rise time
+    if alignment:
+        aligned_peaks = peak_current.copy(deep=True)
+        # first time point current at >=90% peak for each sweep - NB, might have wanted some rejection criterion for this
+        t_90s =  aligned_peaks[aligned_peaks.abs()>=(aligned_peaks.abs().max()*0.9)].idxmin()
+        for item in np.arange(aligned_peaks.shape[1]):
+                aligned_peaks.iloc[:,item][aligned_peaks.index<t_90s[item]] = np.nan
+                # setting first point to t = 0
+                arr = aligned_peaks.iloc[:,item][aligned_peaks.iloc[:,item].notna()].to_numpy()
+                aligned_peaks.iloc[:np.size(arr),item] = arr
+                aligned_peaks.iloc[np.size(arr):,item] = np.nan # removing residual values
+        # truncate background
+        #inds = np.where(peak_current.index>=t_90s.min())[0]
+    else:
+        aligned_peaks = peak_current
+    # background is not long enough
+        
     #______ --- background variance for isochrones --_____ #
-    ### number of repeats of periodic baseline during peak current
-    r_baseline = (peak_current.index[-1]-peak_current.index[0])/(base.index[-1]-base.index[0])
+    ### number of repeats of periodic baseline during aligned peak current
+    r_baseline = (aligned_peaks.index[-1]-aligned_peaks.index[0])/(base.index[-1]-base.index[0])
     # fraction of period through baseline variance when peak current starts
-    baseline_start = (peak_current.index[0])%(base.index[-1])/(base.index[-1])
+    if alignment:
+        baseline_start = (peak_current.index[-1]-t_90s.index.min())%(base.index[-1])/(base.index[-1])
+    else:
+            baseline_start = (peak_current.index[0])%(base.index[-1])/(base.index[-1])
+
     # calculating background noise for all isochronous time points in peak current
-    # from point when background starts, calculate background varaince for all wave pairs
-    background_period = base[base.index>=(baseline_start*base.index[-1])].to_numpy()
-    background_period = np.vstack((background_period,base[base.index <(baseline_start*base.index[-1])].to_numpy()))
+    # from point when background starts, calculate background variance for all wave pairs
+    background_period = base[base.index>(baseline_start*base.index[-1])].to_numpy()
+    background_period = np.vstack((background_period,base[base.index <=(baseline_start*base.index[-1])].to_numpy()))
     background = background_period
     for item in np.arange(int(np.floor(r_baseline))-1):
         background = np.vstack((background,background_period))
     # from end of last whole period of background, repeat the remaining fraction of the period
-    background = np.vstack((background,background_period[:peak_current.shape[0] - np.size(background,0),:]))
+    background = np.vstack((background,background_period[:aligned_peaks.shape[0] - np.size(background,0),:]))
 
+    #Heinemann and Conti verification for background and periods of interest
+    # performed on aligned ewaves
+    if wave_check:
+        todiscardinterest = RMSDE_wave_check(aligned_peaks)
+        todiscardbackground = RMSDE_wave_check(base)
+        to_remove = np.unique(np.append(todiscardinterest,todiscardbackground))
+        background = np.delete(background,list(to_remove),axis=0)
+        aligned_peaks = aligned_peaks.drop(columns = list(to_remove))
+        
     # initialising plot objects
     if not suppress_g:
         plt.style.use('ggplot')    
@@ -769,130 +802,92 @@ def NSFA(dataframe,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,open_tip_r
         fit_axs.set_ylabel("$\sigma^2$ (pA$^2$)")
     ###
     # convert to numpy: looping faster than dealing with pandas means and var.
-    currents = peak_current.to_numpy()
+    currents = aligned_peaks.to_numpy()
+    
     # perform Sigg (1994) type noise analysis for all time points.
     # mean for each isochrone, for pair diffs holding 'noise traces' of wave pairs
-    # and then caluclating variance of the noise
-    mean_isochrone_current = np.mean(currents,axis = 1)
-    pair_diffs = np.zeros([np.size(currents,axis=0),(np.size(currents,axis=1)-1)])
-    back_diffs = np.zeros([np.size(currents,axis=0),(np.size(currents,axis=1)-1)])
-    isochrone_differences = np.zeros([np.size(currents,axis=0),(np.size(currents,axis=1)-1)])
-    for item in np.arange(np.size(currents,axis=1)-1): # for each first wave of a pair
-        # get noise trace of each wave pair
-        pair_diffs[:,item] = 0.5*(currents[:,item] - currents[:,item+1])
-        # get background noise trace for each wave pair
-        back_diffs[:,item] = 0.5*(background[:,item]-background[:,item+1])
-    # get isochrone noise differences ^2 with list comprehension
-    isochrone_differences=np.vstack([(pair_diffs[:,item]-np.mean(pair_diffs[:,:],axis=1))**2 for item in np.arange(np.size(pair_diffs,1))]).transpose()  
-    # for background
-    background_differences = np.vstack([(back_diffs[:,item]-np.mean(back_diffs[:,:],axis=1))**2 for item in np.arange(np.size(back_diffs,1))]).transpose()  
-    # variance for each isochrone = (2/N) * sum(yi-yu)^2
-    #for each isochrone i, and mean of isochrone, u, N is the number of waves (points along isochrone)
-    variance =  (2/np.size(currents,axis=1))*np.sum(isochrone_differences,axis=1)
-    # background varaince
-    background = (2/np.size(background_differences,axis=1))*np.sum(background_differences,axis=1)
-    # 95% confidence interval of varaince for each isochrone:
-    # removing current-variance pairs for wrong sign
+    # and then calculating variance of the noise
+    mean_isochrone_current = aligned_peaks.mean(axis=1)
     conf_int = sp.stats.norm.interval(0.95,loc=(np.var(currents,axis=1)),scale=np.std((np.var(currents,axis=1))))   # here, use this plot for mean current at time t against variance at t (i.e. for each isochrone current vs variance)
+
+    if pairwise:
+            pair_diffs = np.zeros([np.size(currents,axis=0),(np.size(currents,axis=1)-1)])
+            back_diffs = np.zeros([np.size(currents,axis=0),(np.size(currents,axis=1)-1)])
+            isochrone_differences = np.zeros([np.size(currents,axis=0),(np.size(currents,axis=1)-1)])
+            for item in np.arange(np.size(currents,axis=1)-1): # for each first wave of a pair
+                # get noise trace of each wave pair
+                pair_diffs[:,item] = 0.5*(currents[:,item] - currents[:,item+1])
+                # get background noise trace for each wave pair
+                back_diffs[:,item] = 0.5*(background[:,item]-background[:,item+1])
+            # get isochrone noise differences ^2 with list comprehension
+            isochrone_differences=np.vstack([(pair_diffs[:,item]-np.mean(pair_diffs[:,:],axis=1))**2 for item in np.arange(np.size(pair_diffs,1))]).transpose()  
+            # for background
+            background_differences = np.vstack([(back_diffs[:,item]-np.mean(back_diffs[:,:],axis=1))**2 for item in np.arange(np.size(back_diffs,1))]).transpose()  
+            # variance for each isochrone = (2/N) * sum(yi-yu)^2
+            #for each isochrone i, and mean of isochrone, u, N is the number of waves (points along isochrone)
+            var_isochrone_current =  (2/np.size(currents,axis=1))*np.sum(isochrone_differences,axis=1)
+            # background varaince
+            background = (2/np.size(background_differences,axis=1))*np.sum(background_differences,axis=1)
+            # 95% confidence interval of varaince for each isochrone:
+            # removing current-variance pairs for wrong sign
+            if not suppress_g:
+                noise_axs.scatter(np.abs(np.mean(currents,axis=1)),(var_isochrone_current-background),marker='.',color='grey',label = ' |Isochrone mean (I)| vs $\sigma^2$(noise) - $\sigma^2$B(noise)')
+                raw_axs.errorbar(np.abs(np.mean(currents,axis=1)),(var_isochrone_current+background),yerr = conf_int,marker='.',color='black',barsabove=True,errorevery=10,label = 'Isochrone I vs $\sigma^2$(I) + $\sigma^2$B 95% CI')
+
+    else:
+        var_isochrone_current = aligned_peaks.var(axis=1)
+        background = background.var(axis=1)
+        if not suppress_g:
+                noise_axs.scatter(np.abs(np.mean(currents,axis=1)),(var_isochrone_current-background),marker='.',color='grey',label = ' |Isochrone mean (I)| vs $\sigma^2$(noise) - $\sigma^2$B(noise)')
+                raw_axs.errorbar(np.abs(np.mean(currents,axis=1)),(var_isochrone_current+background),yerr = conf_int,marker='.',color='black',barsabove=True,errorevery=10,label = 'Isochrone I vs $\sigma^2$(I) + $\sigma^2$B 95% CI')
+    if num_bins == 0: # if no bins, use each isochrone separately
+        num_bins = int(mean_isochrone_current.size)
+    x = (np.vstack((mean_isochrone_current,background,var_isochrone_current))).transpose()  
+    if np.any(np.isnan(background))==True:
+        #x[:,1] = 0 #
+        ### catch cases where background not there (previous solution above forced all background to 0)
+        x[x[1,:]==np.nan]=0
+    x = pd.DataFrame(x)
+    x.index = peak_current.index
+    x[3] = pd.cut(x[0],num_bins)
+    x = x.sort_values(3)
+    x = x.groupby(x[3]).mean()
+    x = (x.to_numpy()).transpose()
+    x = np.flip(x,axis=1)
+
+    if voltage <0:
+        if np.abs(aligned_peaks.min().min())>aligned_peaks.max().max(): # if negative current at negative potentials
+            x[0,:] = -x[0,:] # invert current so that current of interest on positive axis
+    # remove non-finite elements
+    x = np.delete(x,np.where(~np.isfinite(x)),axis=1)
+    popt,pcov = sp.optimize.curve_fit(noise_func, x[:2,:], x[2,:])
+
+    # plotting the fit 
+    perr = np.sqrt(np.diag(pcov))
     if not suppress_g:
-        noise_axs.scatter(np.abs(np.mean(currents,axis=1)),(variance-background),marker='.',color='grey',label = ' |Isochrone mean (I)| vs $\sigma^2$(noise) - $\sigma^2$B(noise)')
-        raw_axs.errorbar(np.abs(np.mean(currents,axis=1)),(variance+background),yerr = conf_int,marker='.',color='black',barsabove=True,errorevery=10,label = 'Isochrone I vs $\sigma^2$(I) + $\sigma^2$B 95% CI')
-    ### here: a background plot over time?
-    if not num_bins: # if no bins, perform fit to whole current varaince relationship.
-        x = np.zeros([3,np.size(variance)])
-        x[0,:] = mean_isochrone_current # absolute mean current value
-        x[1,:] = background
-        x[2,:] = variance
-        if np.any(np.isnan(background))==True:
-            #x[:,1] = 0 #
-            ### catch cases where background not there (previous solution above forced all background to 0)
-            x[x[1,:]==np.nan]=0
-        # inverting current so max negative amplitude on right
-        x = np.flip(x,axis=1)
-        # removing current of wrong sign (e.g. +ve current in outside-out or vice versa)
-        popt,pcov = sp.optimize.curve_fit(noise_func, x[:2,:], x[2,:])
-        #popt = np.abs(popt) # for outside_out, making vals absolute
-        # plotting fit against raw data
-        if not suppress_g:
-            noise_axs.scatter(-x[0,:],noise_func(x[:2,:],popt[0],popt[1]),linestyle="--",color='red',label='fit,N={},i={}'.format(np.round(popt[0],2),np.round(popt[1],2)))
-        #plotting errors of raw data
-        # plot fit with errorbars
-        # 1SD of errors
-        perr = np.sqrt(np.diag(pcov))
-        # using to get error of the fit
-        sdefit = noise_func(x[:2,:],perr[0],perr[1])
-        if fix_N:
-            N = fix_N
-        else:
-            N = np.abs(popt[0])
-        if fix_i:
-            i = fix_i
-        else:
-            i = np.abs(popt[1])
-        # Nb, for outside out (-ve current)
-        if voltage <0:
-            P_open = np.max(-x[0,:])/(N*i)
-            # mean conductance (in pS)
-            ## ((imax / (V-Vrev))/Po)/N = y
-            y_mean = (np.max(-x[0,:])/((voltage*10**-3)-Vrev)/P_open)/N   
-        else:
-            P_open = np.max(x[0,:])/(N*i)
-            y_mean = (np.max(x[0,:])/((voltage*10**-3)-Vrev)/P_open)/N   
+        noise_axs.scatter(x = x[0,:],y = noise_func(x[:2,:],popt[0],popt[1]),linestyle="--",color='red',label='fit,N={},i={}'.format(np.round(popt[1],2),np.round(popt[0],2)))
+        noise_axs.set_title("Binned fit (nbins={}) vs raw data".format(num_bins))
+        noise_axs.set_xlim(left = 0)
+        noise_axs.set_ylim(bottom = 0)
 
-
-        if not suppress_g:
-            #fit_axs.errorbar(-x[0,:],noise_func(x[:2,:],popt[0],popt[1]),yerr = sdefit,barsabove=True,errorevery= np.floor(np.size(currents,axis=0)/10), fmt="o",capsize = 5)
-            fit_axs.errorbar(-x[0,:],noise_func(x[:2,:],popt[0],popt[1]),yerr = sdefit,barsabove=True, fmt="o",capsize = 5)
-
-            fit_axs.set_title("Unbinned Fitted I vs $\sigma^2$ ")
-            noise_axs.set_title("Unbinned fit vs raw data: ")
-            noise_axs.set_xlim(left=0)
-            noise_axs.set_ylim(bottom=0)
-
-
-    else: # if binning, bin by mean_current of isochrone
-        # such that each bin ctributes to amplitude of current equally.
-        x = (np.vstack((mean_isochrone_current,background,variance))).transpose()  
-        if np.any(np.isnan(background))==True:
-            #x[:,1] = 0 #
-            ### catch cases where background not there (previous solution above forced all background to 0)
-            x[x[1,:]==np.nan]=0
-        x = pd.DataFrame(x)
-        x.index = peak_current.index
-        x[3] = pd.cut(x[0],num_bins)
-        x = x.sort_values(3)
-        x = x.groupby(x[3]).mean()
-        x = (x.to_numpy()).transpose()
-        x = np.flip(x,axis=1)
-        popt,pcov = sp.optimize.curve_fit(noise_func, x[:2,:], x[2,:])
-        #popt = np.abs(popt) # for outside_out, making vals absolute
-        # plotting the fit 
-        perr = np.sqrt(np.diag(pcov))
-        # inverting current to get region of interest
-        if not suppress_g:
-            noise_axs.scatter(x = -x[0,:],y = noise_func(x[:2,:],popt[0],popt[1]),linestyle="--",color='red',label='fit,N={},i={}'.format(np.round(popt[0],2),np.round(popt[1],2)))
-            noise_axs.set_title("Binned fit (nbins={}) vs raw data".format(num_bins))
-            noise_axs.set_xlim(left = 0)
-            noise_axs.set_ylim(bottom = 0)
-
-        sdefit = noise_func(x[:2,:],perr[0],perr[1])
-        if not suppress_g:
-            fit_axs.errorbar(np.abs(-x[0,:]),np.abs(noise_func(x[:2,:],popt[0],popt[1])),yerr = sdefit,barsabove=True, fmt="o",capsize = 5,color='black')
-            fit_axs.set_title("Binned fit +- 1SD Errors of fit")
-            fit_axs.set_xlim(left = 0)
-            fit_axs.set_ylim(bottom = 0)
+    sdefit = noise_func(x[:2,:],perr[0],perr[1])
+    if not suppress_g:
+        fit_axs.errorbar(np.abs(x[0,:]),np.abs(noise_func(x[:2,:],popt[0],popt[1])),yerr = sdefit,barsabove=True, fmt="o",capsize = 5,color='black')
+        fit_axs.set_title("Binned fit +- 1SD Errors of fit")
+        fit_axs.set_xlim(left = 0)
+        fit_axs.set_ylim(bottom = 0)
     if parabola:
         if not suppress_g:
             parabfig,parabaxs = plt.subplots()
             parabaxs.set_xlabel("I")
             parabaxs.set_ylabel("$\sigma^2$ (pA$^2$)")
             # simulating data: double current
-            max_current = -(np.max(-x[0,:]))
+            max_current = (np.max(x[0,:]))
             sim_current = np.linspace(max_current,2*max_current,np.size(x[0,:]))
             # need to simulate the variance for greater current values
             sim_curr_back = np.vstack((sim_current,x[1,:]))
-            parabaxs.scatter(-x[0,:],noise_func(x[:2,:],popt[0],popt[1]),label = 'Parabolic fit to data',color='black')
-            parabaxs.plot(-sim_current,noise_func(sim_curr_back,popt[0],popt[1]),linestyle="--",color='red',label='fit of noise parabola to simulated data,N={},i={}'.format(np.round(popt[0],2),np.round(popt[1],2)))
+            parabaxs.scatter(x[0,:],noise_func(x[:2,:],popt[0],popt[1]),label = 'Parabolic fit to data',color='black')
+            parabaxs.plot(sim_current,noise_func(sim_curr_back,popt[0],popt[1]),linestyle="--",color='red',label='fit of noise parabola to simulated data,N={},i={}'.format(np.round(popt[1],2),np.round(popt[0],2)))
             parabaxs.legend()
             parabaxs.set_title("Fit of simulated and experimental data")
             parabaxs.set_ylim(bottom=0)
@@ -900,24 +895,14 @@ def NSFA(dataframe,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,open_tip_r
             parabfig.tight_layout()
             # simulating data for rest of curve
     SD_errors = np.sqrt(np.diag(pcov))
-    if fix_N:
-        N = fix_N
-    else:
-        N = np.abs(popt[0])
-    if fix_i:
-        i = fix_i
-    else:
-        i = np.abs(popt[1])
+    N = np.abs(popt[1])
+    i = np.abs(popt[0])
     # Nb, for outside out (-ve current)
-    if voltage<0:
-        P_open = np.max(-x[0,:])/(N*i)
-            # mean conductance (in pS)
-    ## ((imax / (V-Vrev))/Po)/N = y
-        y_mean = (np.max(-x[0,:])/((voltage*10**-3)-Vrev)/P_open)/N
-
-    else:
-        P_open = np.max(x[0,:])/(N*i)
-        y_mean = (np.max(x[0,:])/((voltage*10**-3)-Vrev)/P_open)/N    
+    # get P_open as maximum of current/N*i
+    P_operrs = (np.array([SD_errors[0]/i,SD_errors[1]/N])).prod()
+    
+    P_open = (np.nanmax(np.abs(x[0,:])))/(N*i)
+    y_mean = (np.max(np.abs(x[0,:]))/((voltage*10**-3)-Vrev)/P_open)/N
     pubfig,pubaxs = plt.subplots()
     pubaxs.plot(np.abs(-x[0,:]),np.abs(noise_func(x[:2,:],popt[0],popt[1]))-np.abs(x[1,:]),color='black',Label = 'Fit')
     pubaxs.scatter(np.abs(-x[0,:]),x[2,:]-x[1,:],color ='midnightblue',marker='.',label="Binned Data")
@@ -926,14 +911,6 @@ def NSFA(dataframe,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,open_tip_r
     pubaxs.set_ylabel("$\sigma^2$ (pA$^2$)")
     #pubaxs.set_facecolor("white")
     pubaxs.annotate("{}pS".format(np.abs(np.round(y_mean,2))),xycoords = 'figure fraction',xy=[0.5,0.9])
-    # if parabola:
-    #     max_current = -(np.max(-x[0,:]))
-    #     sim_current = np.linspace(max_current,100*max_current,np.size(x[0,:]))
-    #     # need to simulate the variance for greater current values
-    #     sim_curr_back = np.vstack((sim_current,x[1,:]))
-    #     pubaxs.plot(-sim_current,noise_func(sim_curr_back,popt[0],popt[1]),linestyle="--",color='black',label='Extrapolated Fit')
-    #     pubaxs.set_ylim(bottom=0)
-    #     pubaxs.set_xlim(left=0)
     pubfig.legend(loc=[0.75,0.85])
     pubfig.tight_layout()
     if not suppress_g:
@@ -945,10 +922,9 @@ def NSFA(dataframe,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,open_tip_r
         if wave_check:
             print("Waves {} were removed (background or ROI > 7RMSE)".format(len(to_remove)))
         if not voltage:
-            print('Fitted N = {} +-{},i = {} +-{},P_open = {}'.format(np.round(N,2),np.round(SD_errors[0],2),np.round(i,2),np.round(SD_errors[1],2),np.round(P_open,2)))
+            print('Fitted N = {} +-{},i = {} +-{},P_open = {}+-{}'.format(np.round(N,2),np.round(SD_errors[1],2),np.round(i,2),np.round(SD_errors[0],2),np.round(P_open,2),np.round(P_operrs,3)))
         else:
-            g = i/(voltage-Vrev)
-            print('Fitted N = {} +-{},i = {} +-{},P_open = {},gamma_mean = {}'.format(np.round(N,2),np.round(SD_errors[0],2),np.round(i,2),np.round(SD_errors[1],2),np.round(P_open,2),np.round(y_mean,2)))
+            print('Fitted N = {} +-{},i = {} +-{},P_open = {}+-{},gamma_mean = {}'.format(np.round(N,2),np.round(SD_errors[1],2),np.round(i,2),np.round(SD_errors[0],2),np.round(P_open,2),np.round(P_operrs,3),np.round(y_mean,2)))
         if not parabola:
             print("If you wish to extend the parabola, call again with parabola = True. This can be useful to see whether a fit is adequate, and is particularly useful after binning")
         if return_var:
@@ -959,7 +935,7 @@ def NSFA(dataframe,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,open_tip_r
         if return_var:
             return(N,i,P_open,y_mean,x)
         else:
-            return(N,i,P_open,y_mean,SD_errors)
+            return(N,i,P_open,y_mean,np.append(SD_errors,P_operrs))
 
 def shared_N_NSFA(dataframe,voltages=[-60,-40,-20,0,20,40,60],num_bins = 20,Vrev = 0,open_tip_response = False,start_time = False,end_time = False,background_start = False,background_end = False):
     """
@@ -1134,10 +1110,7 @@ def shared_N_NSFA(dataframe,voltages=[-60,-40,-20,0,20,40,60],num_bins = 20,Vrev
         # here it's minus 20 that is the problem
         
         #but cna make all same sign would help
-        
-        
-        
-
+    
     # if using different number of voltages, this needs changing
         # it doesn't matter what the voltages are here, only that there are 6 for 
         # to +40 in mine, and 7 when full I-V
@@ -1158,7 +1131,6 @@ def shared_N_NSFA(dataframe,voltages=[-60,-40,-20,0,20,40,60],num_bins = 20,Vrev
             popt = np.nan,np.nan,np.nan,np.nan,np.nan,np.nan
             perr = np.nan
 
-        
     N = np.abs(popt[0]) # N is single value
     i = np.abs(popt[1:])
     P_opens = []
@@ -1177,15 +1149,8 @@ def shared_N_NSFA(dataframe,voltages=[-60,-40,-20,0,20,40,60],num_bins = 20,Vrev
     ##--Plotting--##
         # haven't done yet.
         # was performed post-hoc
-    
-        
-        
-        
     return(N,i,P_opens,y_means,x)
-    
 
-
-    
 def recovery_from(record,num_events=8):
     """Accepts an averaged, baselined record and calculates the time constant for the recovery
     from desensitisation. A number of events are accepted, as well as a record max
@@ -1199,8 +1164,6 @@ def recovery_from(record,num_events=8):
     where fractional peak recovery is a pandas series containing the (negative)
     amplitudes of the second pulse normalised to the first pulse.
     """
-    
-    
     print("final event is record max")
     aligned_record = align_within(record=record,num_events=num_events)
     aligned_record.pop(-1)
@@ -1239,13 +1202,6 @@ def recovery_from(record,num_events=8):
     recfig,recaxs = plt.subplots()
     for item in norm_pp:
         recaxs.plot(item,color='black')
-    # recaxs.plot(norm_pp[0],color='black')
-    # recaxs.plot(norm_pp[1],color='black')
-    # recaxs.plot(norm_pp[2],color='black')
-    # recaxs.plot(norm_pp[3],color='black')
-    # recaxs.plot(norm_pp[4],color='black')
-    # recaxs.plot(norm_pp[5],color='black')
-    # recaxs.plot(norm_pp[6],color='black')
     A,Tau = exp_fitter(recovery_frame,double=False,fitflag=False)
         
     recaxs.set_title("Normalised recovery, Tau = {}".format(Tau))
@@ -1269,7 +1225,6 @@ def recovery_from(record,num_events=8):
     rec2fig.tight_layout()
     print("Current of amplitude {} recovered from desensitisation with Tau ={}".format(aligned_record[0].min(),Tau))
     return(aligned_record[0].min(),Tau,recovery_frame)
-
 
 def NBQX_unbinding(dataframe,open_tip_response,give_onset = False,onset_lo_lim =False,onset_up_lim=False,give_peak = False):
     """
@@ -1310,7 +1265,6 @@ def NBQX_unbinding(dataframe,open_tip_response,give_onset = False,onset_lo_lim =
     max current(mean of the 100th bin), Tau_NBQX_unbinding, m, 10-90% rise time
 
     """
-    
     if not give_onset:
         if not onset_lo_lim:
             onset = get_open_tip_onset(open_tip_response) # call embedded functions for user selected open_tiponset time and peak time
@@ -1521,17 +1475,7 @@ def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,sh
             plt.plot(It.index,It,color='black',label= 'data')
            
             
-# =============================================================================
-# #Deprecated: see warning in double exp fit
-
-        #Tau = (It.index.max()-It.index.min())/popt[1]
-        #a = popt[0]*(It.index.min()/(It.index.max()-It.index.min()))
-        #print("A {} monoexponential function was fitted,a={},Tau = {}".format(mtype,a,Tau))
-        
-        #nb, returns were also changed
-# partially reinstated 160321: returning abolsute Tau, and A 
         Tau = np.abs(popt[1])
-# =============================================================================
         print("A {} monoexponential function was fitted,a={} from fit end,Tau = {}".format(mtype,popt[0],Tau))
         plt.show()
         print("1SD errors = {}".format(np.sqrt(np.diag(pcov))))
@@ -1581,16 +1525,6 @@ def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,sh
              plt.legend()
         # correcting time constant and amplitude values for their real domain
 # =============================================================================
-# Deprecated: chnaging popt to their domain
-       # A = popt[0]*np.exp((It.index.min()/(It.index.max()-(It.index.min())))/popt[2])
-       # B = popt[1]*np.exp((It.index.min()/(It.index.max()-(It.index.min())))/popt[3])
-        #Taufast = (It.index.max()-It.index.min()) * popt[2]
-        #Tauslow = (It.index.max()-It.index.min()) * popt[3]
-        #weightedtau = (Taufast*(A/(A+B))) + (Tauslow*(B/(A+B)))
-        #print("A sum of {} exponentials was fitted. A = {}, B = {}, Taufast = {},Tauslow={}".format(mtype,A,B,Taufast,Tauslow))
-        
-        # nb, return was changed to give *popt
-        # monexpon was also changed
 ######===========================================######
 # reinstated partially: 160321:
     #returning tau as absolute value
@@ -1607,15 +1541,8 @@ def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,sh
         print("1SD errors = {}".format(np.sqrt(np.diag(pcov))))
         plt.show()
         return(A,B,Taufast,Tauslow,weightedtau)
-##### Here,
-    # so fit is great, but output time constants is shit (which means that weighted is shit)
-        # think because they aren't on the same scale!
-            # get tau scale as fitted tau * (tfinal-tzero)
-    # need to add axis labels to plots.
 #____________________________________________________________________________#
 #----------------------------- Data Saving ----------------------------------#
-
-
 rootpath = os.path.dirname(os.path.realpath(__file__)) # getting module root
 ##### setting up file storage and analysis method logging
 print("\n \n \n Outputs will be saved to: {}".format(rootpath))
@@ -1713,7 +1640,6 @@ def multiplot_clean_data(self,groupsize=20,separate_avg =False,panelsizein = 20,
     else:
         cleaning_figure_axes[-2].set_title('No Sweeps Removed')
         
-        
 def clean_data(dataframe_to_clean,remove_sweeps = False,last_removed = False):
     """Repeatedly accesses multiplot_clean_data, allowing removal of and 
     visualisation of suspect sweeps.
@@ -1733,8 +1659,7 @@ def clean_data(dataframe_to_clean,remove_sweeps = False,last_removed = False):
     ### should print hint to make sure that all panels of plot have similar x axis scale.
     # and for low Nchannel recording, rundown not nec correct, since noise is likely to be max, however after filtering...
     ## should print warning that rundown can be seen by groups <1, and >1is runup,either a specific effect, or perhaps indicating breakdown/interference
-    
-    
+
 def sweeplist_splitter(sweeps_to_split,grouping):
     """Nests sweeps form a pandas DataFrame into groups of size grouping"""
     listofselfgroups = list(np.arange(0,sweeps_to_split.count().count()))
@@ -1889,7 +1814,6 @@ def on_click(event):
         time_event, amplitude_event = event.xdata, event.ydata
         print("event time =",time_event,", amplitude =", amplitude_event)
 
-
 def noise_func(x,N,i): # where x is an independent variable containg data for I_mean and background_var
     """Embedded function used for curve fitting of non-stationary fluctuation
     analysis: ensemble variance = i*I_mean/(N+background variance)"""
@@ -1917,7 +1841,6 @@ def shared_N_noise_func(x,N,i_m60,i_m40,i_m20,i_0,i_20,i_40):
     #return(np.concatenate((noise_func(x,N,i_m60),noise_func(x,N,i_m40),noise_func(x,N,i_m20),noise_func(x,N,i_0),noise_func(x,N,i_20),noise_func(x,N,i_40))))
     return(np.concatenate((noise_func(x[:,:num_bins],N,i_m60),noise_func(x[:,num_bins:2*num_bins],N,i_m40),noise_func(x[:,2*num_bins:3*num_bins],N,i_m20),noise_func(x[:,3*num_bins:4*num_bins],N,i_0),noise_func(x[:,4*num_bins:5*num_bins],N,i_20),noise_func(x[:,5*num_bins:6*num_bins],N,i_40))))
 
-
 def shared_N_noise_fun_to_60(x,N,i_m60,i_m40,i_m20,i_0,i_20,i_40,i_60):
     """
     x: current decays concatenated along axis 1, where rows are:
@@ -1936,7 +1859,6 @@ def shared_N_noise_fun_to_60(x,N,i_m60,i_m40,i_m20,i_0,i_20,i_40,i_60):
     #return(np.concatenate((noise_func(x,N,i_m60),noise_func(x,N,i_m40),noise_func(x,N,i_m20),noise_func(x,N,i_0),noise_func(x,N,i_20),noise_func(x,N,i_40),noise_func(x,N,i_60))))
     return(np.concatenate((noise_func(x[:,:num_bins],N,i_m60),noise_func(x[:,num_bins:2*num_bins],N,i_m40),noise_func(x[:,2*num_bins:3*num_bins],N,i_m20),noise_func(x[:,3*num_bins:4*num_bins],N,i_0),noise_func(x[:,4*num_bins:5*num_bins],N,i_20),noise_func(x[:,5*num_bins:6*num_bins],N,i_40),noise_func(x[:,6*num_bins:7*num_bins],N,i_60))))
 
-        
 def H_H_monofit_NBQX(x,m):
     """Embedded function to fit a monoexponential Hodgkin-Huxley
     type equation I_t = A*(1-e^(-t/Tau))^m, using Tau as an argument for sweeps in
@@ -1945,7 +1867,6 @@ def H_H_monofit_NBQX(x,m):
     Tau = x[1,:]
     A = x[2,:]
     return(np.array(A*(1-np.exp(-t/Tau))**m))
-
 
 def exp_fit(x,Tau):
     # where x is an independent variable contianing data for A1, time, and Iss
@@ -1972,9 +1893,6 @@ def parabola(x,a,b,c):
     if not c:
         c = 0
     return((a*x**2)+(b*x)+c)
-
-
-
 
 from matplotlib.offsetbox import AnchoredOffsetbox
 class AnchoredScaleBar(AnchoredOffsetbox):
@@ -2010,7 +1928,6 @@ class AnchoredScaleBar(AnchoredOffsetbox):
         AnchoredOffsetbox.__init__(self, loc, pad=pad, borderpad=borderpad,
                                    child=bars, prop=prop, frameon=False, **kwargs)
 
-        
 def add_scalebar(ax, matchx=True, matchy=True, hidex=True, hidey=True, **kwargs):
     """ Add scalebars to axes
     Adds a set of scale bars to *ax*, matching the size to the ticks of the plot
@@ -2025,26 +1942,15 @@ def add_scalebar(ax, matchx=True, matchy=True, hidex=True, hidey=True, **kwargs)
     def f(axis):
         l = axis.get_majorticklocs()
         return len(l)>1 and (l[1] - l[0])
-    
     if matchx:
         kwargs['sizex'] = f(ax.xaxis)
         kwargs['labelx'] = str(kwargs['sizex'])
     if matchy:
         kwargs['sizey'] = f(ax.yaxis)
         kwargs['labely'] = str(kwargs['sizey'])
-        
     sb = AnchoredScaleBar(ax.transData, **kwargs)
     ax.add_artist(sb)
-
     if hidex : ax.xaxis.set_visible(False)
     if hidey : ax.yaxis.set_visible(False)
     if hidex and hidey: ax.set_frame_on(False)
-
-    return sb       
-         
-#__________ useful notes:
- # to create a range of numbers as form string, string_of = [str(i).zfill(1) for i in range(0,64).            
-            
- # Scaling algorithmfrom molecular devices. Necessary data cab be accessed through myabfvariablename.headertext.splitlines() etc.
- # The algorithm is: (DataPoint - fInstrumentOffset + fSignalOffset) * fInstrumentScaleFactor * fSignalGain * fADCProgrammableGain) * (lADCResolution / fADCRange)
- 
+    return sb
