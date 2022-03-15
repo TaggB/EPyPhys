@@ -515,127 +515,55 @@ def normalise_currents(data,make01=True,poscurrent=False):
     return(normalised)
 
 
-from scipy.signal import butter, freqz, filtfilt
+from scipy.signal import butter, lfilter # freqz
 
 def butter_lowpass(cutoff, fs, order=5):
+    """
+    Built-in used by butter_lowpass_filter
+    """
     nyq = 0.5 * fs
     normal_cutoff = cutoff / nyq
-    b, a = butter(order, normal_cutoff, btype='low', analog=False, fs=None)
+    b, a = butter(order, normal_cutoff, btype='low', analog=False, fs=fs)
     return b, a
 
 def butter_lowpass_filter(x, cutoff, fs, order=5):
+    """
+    Parameters
+    ----------
+    x : data
+    cutoff : cutoff frequency in Hz
+    fs : sampling frequency of the data
+    order : Filter order. The default is 5.
+
+    Returns
+    -------
+    Filtered data
+    
+    Can be used as .apply_along_axis method
+
+    """
     b, a = butter_lowpass(cutoff, fs, order=order)
-    return filtfilt(b, a, x)
+    return lfilter(b, a, x)
     
 #-----------------------------------------------------------------------------    
 #######_________________________ANALYSIS METHODS_________________________#####
 
-def NSFA_optimal(dataframe,binrange = [5,20],parabola = True,Vrev = 0,voltage = False,open_tip_response = False,start_time = False,end_time = False,background_start = False,background_end = False):
-    """Detects the optimal number of bins over binrange based on minimisation
-    of the product of 1SD errors for N and i using binned pairwise NSFA,
-    and then peforms the pairwise NSFA using optimal number of bins as:
-   
+    # plot cov [0,:] which is the autocovariance centred at the peak vs the ensemble current
+        # because i've aligned the current, such that row 0 is the aligned point 
+    # which shows the relationship of currents fluctuations over time
     
-    Performs Sigg (1997) style pairwise non-stationary fluctuation analysis between
-    two points of interest.
-    Variance of the noise is calculated for N waves as:
-        Variance = (2/N)* (yi-yu)^2
-        Where yi = 0.5*(xi-xu): 
-            The average difference of each pairwise noise trace for each isochrone
-            minus mean of all pairwise average differences for each isochrone
-        As such, the varaince measured is the variance of noise between successive
-        wave pairs at each isochrone.
+    # also return corr, which gives strength of the relationship - might be useful for insight
+
+    # what would the average of all points show?
+        # WOULD IT NEED TO BE THE AVERAGE OF triangular (lower of symmetrical) elements?
+        # For each ti, the extent to which ti is related to all other tjs
         
-    N and i are then fit using:
-        Varaince = i*I - (I^2/N) + Background_varaince
-            Where I = mean current at each isochrone.
-            Background-varaince is the pairwise variance of noise (as calculated
-            above) when the periodic background signal is convolved through
-            the interval of interest.
-    
-    Graphs are produced (see Returns:)
+    # could clean up returns so that a single item is returned
+        # e.g. a dict
 
-    Parameters
-    ----------
-    dataframe : Pandas DataFrame
-        Containing data for all sweeps
-    num_bins : list of two values
-        A range of possible number of bins. The number of bins used for the final
-        analysis is based on the minimisation of 1SD erros for each fit in this range
-        
-        The Default is [5,20].
-    Vrev : 
-        Reversal potential to calculate single channel condutance. The default is 0.
-    parabola : True/False
-        When True, data is simulated from maximum current:2* maximum current
-        to 'extend' the fit. The default is True.
-    voltage :
-        voltage used to calculate single channel conductance. The default is False.
-        When False, single channel current, but not conductance, is returned.
-    open_tip_response : Pandas DataFrame
-        Responses of an open_tip_response. If False, the first point is selected
-        from the response of the experimental trace in dataframe.
-        The default is False.
-    start_time (s) : 
-        Start time for interval in which to perform pairwise analysis. When
-        False, user is asked to select from graph. The default is False.
-    end_time (s) : T
-        End time for interval in which to perform pairwise analysis. When
-        False, user is asked to select from graph. The default is False.
-    background_start (ms) : TYPE, optional
-        Time from which to take background interval. The default is False = 0.
-    background_end (ms)
-        Time until which to take background interval. The default is False = 20
-
-    Returns
-    -------
-    Graphs:
-        Graph 1: mean current for each isochrone in the interval vs variance of the CURRENT
-            + 1SD errors for variance of the current.
-        Graph 2: The binned (or not) fit with N and i; the background corrected
-            mean current vs mean varaince of the noise
-        Graph 3: The binned fit + 1SD errors of fit
-        Graph 4: If Parabola = True, then the fit is extended beyond the dataset.
-                See Parbola arg
-
-    """
-    ####### config
-    if not start_time: # if no start time is provided, see if an open-tip-response dataframe was given
-        if not np.any(open_tip_response): # if not, allow onset time selection from experimental record
-            start_time = get_open_tip_onset(dataframe)
-        else:
-            start_time = get_open_tip_onset(open_tip_response)
-    if not end_time: # if no peak time is specified
-        end_time = get_peak(dataframe) # obtained from graph
-    if not background_start:
-        background_start = 0
-    if not background_end:
-        background_end = 20 # baseline end in ms
-    binrange = np.array(binrange)
-    #### perofmring binned noise analysis with nbins
-    SDerrorfit = np.zeros([2,binrange[1]-binrange[0]])
-    for item, value in enumerate(np.arange(binrange[0],binrange[1],1)):
-        _,_,_,SD_errors = NSFA(dataframe,num_bins = value,parabola = False, Vrev=Vrev,voltage = voltage,start_time = start_time,end_time = end_time,background_start = background_start, background_end = background_end,suppress_g =True)
-        SDerrorfit[:,item] = np.product(SD_errors),value
-    print("\n \n \n \n Ignore warnings")
-    num_bins = np.where(SDerrorfit[0,:]==np.nanmin(SDerrorfit[0,:]))[0]
-    ### no, minimisation of covaraince not great idea, as producing silly fit
-    print("optimal Nbins = ",num_bins[0])
-    N,i,P_open,removed = NSFA(dataframe,num_bins = num_bins[0],parabola = True, Vrev=Vrev,voltage = voltage,start_time = start_time,end_time = end_time,background_start = background_start, background_end = background_end,suppress_g =False)
-    return(N,i,P_open,removed)
-
-##### here:
-# fix noise func optimal
-# add cov analysis
-    
-
-#### Might also try a Gaussian regression noise analysis, which may be able to
-     # separate background from current component and thus more accurately extract fit
-     # based on predicted maxima
-
-def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,start_time = False,end_time = False,background_start = False,background_end = False,suppress_g = False,wave_check=False,alignment = True,return_var = False):
-    """    Performs Sigg (1997) style pairwise non-stationary fluctuation analysis between
-    two points of interest.
+def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,start_time = False,end_time = False,background_start = False,background_end = False,suppress_g = False,wave_check=False,alignment = True,return_var = False,cov_corr=False):
+    """    Performs Sigg (1997) style pairwise (or unpaired) non-stationary fluctuation analysis between
+    two points of interest with the options of alignmentand binning.
     
     A Heinemann and Conti, 1997 QC check is performed, and any waves with
     RMSE variance > 7 in either the background or period of interest are removed.
@@ -700,10 +628,20 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
     
     pairwise:True/False: When True, performs Sigg, 1997 noise abalysis where the variance is calculated
         between wave pairs. A parabolic function is then fitted to discretised isochronal paired mean and variance values.
-        Otherwise (False), the parabola is fitted using discretised values of current and varaince across the isochrone for all waves.
+        Otherwise (False), the parabola is fitted using discretised values of current and varaince across the isochrone for all waves
+            -i.e. False = fitted to the ensemble variance, mean, and background.
         
     if wave_check = True, waves >7 RMSE are discarded
-
+    
+    cov_corr: True/False: When True (Default False) returns the symmetric, 2D covariance and correlation matrices
+    centred about the peak of the aligned traces, as well as the mean ensemble response for the same timepoints.
+    When False, two empty arrays are returned instead for covariance and correlation
+        These can be plotted as:
+            plt.plot(aligned_macroscopic_response_dataframe.index,covaraince_matrix[0,:])
+                # which shows the covariance of the first time point (the 90% alignment) with all other t
+                    # where 0 denoees the first time point. For centering about other t, adjust
+            - The same notation can be used to plot correlation
+            - The enzemble average can be plotted simply with: aligned_macroscopic_response.mean(axis=1).plot()
 
     Returns
     -------
@@ -800,6 +738,20 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
         fit_fig,fit_axs =  plt.subplots()
         fit_axs.set_xlabel("I(pA)")
         fit_axs.set_ylabel("$\sigma^2$ (pA$^2$)")
+        
+    ### getting covariance, corr etc; plot cov
+    cov = np.array([])
+    corr = np.array([])
+    if cov_corr:
+        cov = np.cov(aligned_peaks.to_nunmpy())
+        corr = np.corrcoeff(aligned_peaks.to_numpy())
+        covfig,covaxs = plt.subplots()
+        covaxs.set_xlabel("t (s)")
+        covaxs.set_ylabel("$\sigma^2$ (pA$^2$)")
+        covaxs.plot(aligned_peaks.index,np.diag(cov),color='black',label = 'ensemble variance')
+        covaxs.plot(aligned_peaks.index,cov[0,:],color='midnightblue',label = 'Cov(t$_{peak}$,t')
+        covfig.tight_layout()
+        
     ###
     # convert to numpy: looping faster than dealing with pandas means and var.
     currents = aligned_peaks.to_numpy()
@@ -844,7 +796,6 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
         num_bins = int(mean_isochrone_current.size)
     x = (np.vstack((mean_isochrone_current,background,var_isochrone_current))).transpose()  
     if np.any(np.isnan(background))==True:
-        #x[:,1] = 0 #
         ### catch cases where background not there (previous solution above forced all background to 0)
         x[x[1,:]==np.nan]=0
     x = pd.DataFrame(x)
@@ -854,7 +805,6 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
     x = x.groupby(x[3]).mean()
     x = (x.to_numpy()).transpose()
     x = np.flip(x,axis=1)
-
     if voltage <0:
         if np.abs(aligned_peaks.min().min())>aligned_peaks.max().max(): # if negative current at negative potentials
             x[0,:] = -x[0,:] # invert current so that current of interest on positive axis
@@ -865,7 +815,7 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
     # plotting the fit 
     perr = np.sqrt(np.diag(pcov))
     if not suppress_g:
-        noise_axs.scatter(x = x[0,:],y = noise_func(x[:2,:],popt[0],popt[1]),linestyle="--",color='red',label='fit,N={},i={}'.format(np.round(popt[1],2),np.round(popt[0],2)))
+        noise_axs.scatter(x = x[0,:],y = noise_func(x[:2,:],popt[0],popt[1]),linestyle="--",color='red',label='fit,N={},i={}'.format(np.round(popt[0],2),np.round(popt[1],2)))
         noise_axs.set_title("Binned fit (nbins={}) vs raw data".format(num_bins))
         noise_axs.set_xlim(left = 0)
         noise_axs.set_ylim(bottom = 0)
@@ -887,7 +837,7 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
             # need to simulate the variance for greater current values
             sim_curr_back = np.vstack((sim_current,x[1,:]))
             parabaxs.scatter(x[0,:],noise_func(x[:2,:],popt[0],popt[1]),label = 'Parabolic fit to data',color='black')
-            parabaxs.plot(sim_current,noise_func(sim_curr_back,popt[0],popt[1]),linestyle="--",color='red',label='fit of noise parabola to simulated data,N={},i={}'.format(np.round(popt[1],2),np.round(popt[0],2)))
+            parabaxs.plot(sim_current,noise_func(sim_curr_back,popt[0],popt[1]),linestyle="--",color='red',label='fit of noise parabola to simulated data,N={},i={}'.format(np.round(popt[0],2),np.round(popt[1],2)))
             parabaxs.legend()
             parabaxs.set_title("Fit of simulated and experimental data")
             parabaxs.set_ylim(bottom=0)
@@ -895,13 +845,14 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
             parabfig.tight_layout()
             # simulating data for rest of curve
     SD_errors = np.sqrt(np.diag(pcov))
-    N = np.abs(popt[1])
-    i = np.abs(popt[0])
+    N = np.abs(popt[0])
+    i = np.abs(popt[1])
     # Nb, for outside out (-ve current)
     # get P_open as maximum of current/N*i
-    P_operrs = (np.array([SD_errors[0]/i,SD_errors[1]/N])).prod()
+    P_operrs = (np.array([SD_errors[0]/i,SD_errors[1]/N])).prod() # % errors in i and N
     
     P_open = (np.nanmax(np.abs(x[0,:])))/(N*i)
+    P_operrs = P_operrs*P_open # convert % error into P_open units
     y_mean = (np.max(np.abs(x[0,:]))/((voltage*10**-3)-Vrev)/P_open)/N
     pubfig,pubaxs = plt.subplots()
     pubaxs.plot(np.abs(-x[0,:]),np.abs(noise_func(x[:2,:],popt[0],popt[1]))-np.abs(x[1,:]),color='black',Label = 'Fit')
@@ -928,14 +879,14 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
         if not parabola:
             print("If you wish to extend the parabola, call again with parabola = True. This can be useful to see whether a fit is adequate, and is particularly useful after binning")
         if return_var:
-            return(N,i,P_open,y_mean,x)
+            return(N,i,P_open,y_mean,x,cov,corr)
         else:
-            return(N,i,P_open,y_mean)
+            return(N,i,P_open,y_mean,cov,corr)
     else:
         if return_var:
-            return(N,i,P_open,y_mean,x)
+            return(N,i,P_open,y_mean,x,cov,corr)
         else:
-            return(N,i,P_open,y_mean,np.append(SD_errors,P_operrs))
+            return(N,i,P_open,y_mean,np.append(SD_errors,P_operrs),cov,corr)
 
 def shared_N_NSFA(dataframe,voltages=[-60,-40,-20,0,20,40,60],num_bins = 20,Vrev = 0,open_tip_response = False,start_time = False,end_time = False,background_start = False,background_end = False):
     """
@@ -1079,7 +1030,6 @@ def shared_N_NSFA(dataframe,voltages=[-60,-40,-20,0,20,40,60],num_bins = 20,Vrev
         # background varaince
         background = (2/np.size(background_differences,axis=1))*np.sum(background_differences,axis=1)
         
-
         #will have split each into bins and then change the fitted function
         
         unbinned_mean_iso_I = mean_isochrone_current
@@ -1226,7 +1176,7 @@ def recovery_from(record,num_events=8):
     print("Current of amplitude {} recovered from desensitisation with Tau ={}".format(aligned_record[0].min(),Tau))
     return(aligned_record[0].min(),Tau,recovery_frame)
 
-def NBQX_unbinding(dataframe,open_tip_response,give_onset = False,onset_lo_lim =False,onset_up_lim=False,give_peak = False):
+def NBQX_unbinding(dataframe,open_tip_response,n_bins=100,give_onset = False,onset_lo_lim =False,onset_up_lim=False,give_peak = False):
     """
     Using Rosenmund et al., 1997 method of calculating subunit occupancy
     during unbinding of NBQX during saturating agonist concentrations.
@@ -1247,6 +1197,7 @@ def NBQX_unbinding(dataframe,open_tip_response,give_onset = False,onset_lo_lim =
         by an open_tip.
     open_tip_response : Pandas DataFrame
         The open_tip data. Should be specified. The default is False.
+    n_bins: number of bins to cut by. Default =1 00
     give_onset(s) : 
         Time in seconds for the open-tip onset to use. When False, User
         selects from graph. The default is False.
@@ -1281,7 +1232,7 @@ def NBQX_unbinding(dataframe,open_tip_response,give_onset = False,onset_lo_lim =
     
     ##### Performing binning into 100 equally-sized bins by amplitude
     binned_peak[0] = peak_current.mean(axis=1)
-    binned_peak[1] = pd.cut(binned_peak[0],100)
+    binned_peak[1] = pd.cut(binned_peak[0],n_bins)
     binned_peak.reset_index(inplace=True) #setting t as index
     binned_peak = binned_peak.sort_values(1)
     binned_peak = binned_peak.groupby(binned_peak[1]).mean()
@@ -1343,7 +1294,7 @@ def NBQX_unbinding(dataframe,open_tip_response,give_onset = False,onset_lo_lim =
     print(" \n \n \n \n  \n \n \n \n \n mean peak current =",binned_peak.min()[0],"(pA)",",T = ",Tau_unbinding,"(s)",",m = ",popt[0], ",10-90 = ",((peak-onset)*0.9) - ((peak-onset)*0.1),"(s)")
     print("{} empty bins were removed.".format(dropped_cols))
     return(binned_peak.min(),Tau_unbinding,popt,((peak-onset)*0.9) - ((peak-onset)*0.1)) # returning mean peak current, Tau_unbinding, m, and 10-90 rise time
-    
+   
 def current_decay(dataframe,two_components=False):
     """
     Fits 95% peak to:
