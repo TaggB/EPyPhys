@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
 Created on Tue Mar 24 08:29:48 2020
 @author: benjamintagg
 Department of Neuroscience, Physiology, and Pharmacology, UCL, UK
@@ -2172,3 +2175,6 @@ def add_scalebar(ax, matchx=True, matchy=True, hidex=True, hidey=True, **kwargs)
     if hidey : ax.yaxis.set_visible(False)
     if hidex and hidey: ax.set_frame_on(False)
     return sb
+
+
+
