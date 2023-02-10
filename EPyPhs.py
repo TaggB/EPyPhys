@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
 Created on Tue Mar 24 08:29:48 2020
 @author: benjamintagg
 Department of Neuroscience, Physiology, and Pharmacology, UCL, UK
@@ -61,10 +58,14 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backend_bases import MouseButton
+from matplotlib.image import NonUniformImage # for skew analysis
+from matplotlib.colors import ListedColormap # for skew analysis
 import pyabf
 import seaborn as sns
 import scipy as sp
 import os
+from scipy.stats import skew
+from random import sample
 print("Please set Ipython display to automatic in preferences to use interactive graphs. This will require a kernel restart and has been tested using IPython 7.13 with the Spyder IDE (4.1). This is required for interactive plotting")
 print("\n \n \n WELCOME TO EPyPhys 1.0.")
 
@@ -78,7 +79,9 @@ mycycle = cycler(color=[colors[item] for item in colorlist])
 #    plt.rc('axes',prop_cycle=mycycle)
 print("\n \n Currently using ggplot as default plotting environment")
 print("Currently using EPyPhys Color Cycle: black-grey-blues-oranges-yellows")
-
+colorlist2 = colorlist # for skew analysis
+colorlist2[0] = 'white'
+cmap = ListedColormap([item for item in colorlist])
 
 #_____________________________________________________________________________#
 #___________________Data import, screening, merging, and cleaning______________________#
@@ -211,11 +214,19 @@ def merge(records_to_merge_as_dataframes):
     record = pd.DataFrame(merged, index = records_to_merge_as_dataframes[0].index)
     return(record)
 
-def flatten_sweep(sweep):
+def flatten_sweep(sweep,reset_ind=True):
+    """
+    Concatenates all sweeps into a singel sweep
+    If rset_ind=True (Default = True), the index is reset to increase monotonically
+    """
     chained_sweeps = sweep.to_numpy().flatten('F')
     ind = [sweep.index +(sweep.index.max()* item) for item in np.arange(sweep.shape[1])]
     ind = np.array(ind).flatten('C').transpose()
     flat_sweep = pd.Series(chained_sweeps,index=ind)
+    if reset_ind:
+        interval = flat_sweep.index[1]-flat_sweep.index[0]
+        flat_sweep.index = np.arange(0,interval*len(flat_sweep.index),interval)
+        
     return(flat_sweep)
 
 def append_to(record,record2):
@@ -544,6 +555,24 @@ def butter_lowpass_filter(x, cutoff, fs, order=5):
     """
     b, a = butter_lowpass(cutoff, fs, order=order)
     return lfilter(b, a, x)
+
+def resample(current,target_sr):
+    """
+    For downsampling a current to a sampling rate (target_sr) in Hz.
+    
+    current must be of type pandas.pandas.DataFrame
+
+    """
+    #new_inds = pd.cut(current.index,int(np.round(current.index.max()/(1/target_sr),0)))
+    new_inds = pd.cut(current.index,np.arange(current.index.min(),current.index.max(),1/target_sr))
+    resampled = current.groupby(new_inds).mean()  
+    new_index = np.zeros(len(resampled.index))
+    for item, value in enumerate(resampled.index):
+        new_index[item] = value.mid
+    resampled.reset_index(inplace=True)
+    resampled.drop(columns=['index'],inplace=True)
+    resampled.index = new_index
+    return(resampled)
     
 #-----------------------------------------------------------------------------    
 #######_________________________ANALYSIS METHODS_________________________#####
@@ -561,7 +590,7 @@ def butter_lowpass_filter(x, cutoff, fs, order=5):
     # could clean up returns so that a single item is returned
         # e.g. a dict
 
-def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,start_time = False,end_time = False,background_start = False,background_end = False,suppress_g = False,wave_check=False,alignment = True,return_var = False,cov_corr=False):
+def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola = True,start_time = False,end_time = False,background_start = False,background_end = False,suppress_g = False,wave_check=False,alignment = True,return_var = False,cov_corr=False,skew_analysis=False,**kwargs):
     """    Performs Sigg (1997) style pairwise (or unpaired) non-stationary fluctuation analysis between
     two points of interest with the options of alignmentand binning.
     
@@ -686,11 +715,11 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
         # first time point current at >=90% peak for each sweep - NB, might have wanted some rejection criterion for this
         t_90s =  aligned_peaks[aligned_peaks.abs()>=(aligned_peaks.abs().max()*0.9)].idxmin()
         for item in np.arange(aligned_peaks.shape[1]):
-                aligned_peaks.iloc[:,item][aligned_peaks.index<t_90s[item]] = np.nan
+            aligned_peaks.iloc[:,item][aligned_peaks.index<t_90s.iloc[item]] = np.nan # could change to iloc
                 # setting first point to t = 0
-                arr = aligned_peaks.iloc[:,item][aligned_peaks.iloc[:,item].notna()].to_numpy()
-                aligned_peaks.iloc[:np.size(arr),item] = arr
-                aligned_peaks.iloc[np.size(arr):,item] = np.nan # removing residual values
+            arr = aligned_peaks.iloc[:,item][aligned_peaks.iloc[:,item].notna()].to_numpy()
+            aligned_peaks.iloc[:np.size(arr),item] = arr
+            aligned_peaks.iloc[np.size(arr):,item] = np.nan # removing residual values
         # truncate background
         #inds = np.where(peak_current.index>=t_90s.min())[0]
     else:
@@ -738,13 +767,14 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
         fit_fig,fit_axs =  plt.subplots()
         fit_axs.set_xlabel("I(pA)")
         fit_axs.set_ylabel("$\sigma^2$ (pA$^2$)")
+        histnoisefig,histnoiseaxs = plt.subplots()
         
-    ### getting covariance, corr etc; plot cov
+    ### getting covariance, corr etc; plot cov. nb is performed on aligned peaks only if aligmnet = true
     cov = np.array([])
     corr = np.array([])
     if cov_corr:
-        cov = np.cov(aligned_peaks.to_nunmpy())
-        corr = np.corrcoeff(aligned_peaks.to_numpy())
+        cov = np.cov(aligned_peaks.to_numpy())
+        corr = np.corrcoef(aligned_peaks.to_numpy())
         covfig,covaxs = plt.subplots()
         covaxs.set_xlabel("t (s)")
         covaxs.set_ylabel("$\sigma^2$ (pA$^2$)")
@@ -854,16 +884,34 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
     P_open = (np.nanmax(np.abs(x[0,:])))/(N*i)
     P_operrs = P_operrs*P_open # convert % error into P_open units
     y_mean = (np.max(np.abs(x[0,:]))/((voltage*10**-3)-Vrev)/P_open)/N
-    pubfig,pubaxs = plt.subplots()
-    pubaxs.plot(np.abs(-x[0,:]),np.abs(noise_func(x[:2,:],popt[0],popt[1]))-np.abs(x[1,:]),color='black',Label = 'Fit')
-    pubaxs.scatter(np.abs(-x[0,:]),x[2,:]-x[1,:],color ='midnightblue',marker='.',label="Binned Data")
-    pubaxs.grid(False)
-    pubaxs.set_xlabel("I")
-    pubaxs.set_ylabel("$\sigma^2$ (pA$^2$)")
-    #pubaxs.set_facecolor("white")
-    pubaxs.annotate("{}pS".format(np.abs(np.round(y_mean,2))),xycoords = 'figure fraction',xy=[0.5,0.9])
-    pubfig.legend(loc=[0.75,0.85])
-    pubfig.tight_layout()
+    if not suppress_g:
+        pubfig,pubaxs = plt.subplots()
+        pubaxs.plot(np.abs(-x[0,:]),np.abs(noise_func(x[:2,:],popt[0],popt[1]))-np.abs(x[1,:]),color='black',Label = 'Fit')
+        pubaxs.scatter(np.abs(-x[0,:]),x[2,:]-x[1,:],color ='midnightblue',marker='.',label="Binned Data")
+        pubaxs.grid(False)
+        pubaxs.set_xlabel("I")
+        pubaxs.set_ylabel("$\sigma^2$ (pA$^2$)")
+        #pubaxs.set_facecolor("white")
+        pubaxs.annotate("{}pS".format(np.abs(np.round(y_mean,2))),xycoords = 'figure fraction',xy=[0.5,0.9])
+        pubfig.legend(loc=[0.75,0.85])
+        pubfig.tight_layout()
+    # Fischer's moment coefficient fo skewness:
+    I_skew = skew(x[0,:]) # where value >0 is positive skew - i.e. biased towards lower values
+    var_skew = skew(x[2,:]-x[1,:])
+    if skew_analysis: ### added for skew analysis
+        if not suppress_g: # repetition is unefficient here
+            #sns.set_style({"grid.alpha":"0"})
+            gr = sns.jointplot(x=x[0,:],y=x[2,:]-x[1,:],color='midnightblue',edgecolor='midnightblue',marker='.',ax=histnoiseaxs)
+            gr.ax_joint.plot(np.abs(-x[0,:]),np.abs(noise_func(x[:2,:],popt[0],popt[1]))-np.abs(x[1,:]),color='black',Label = 'Fit')
+            gr.ax_marg_x.annotate("$\~{\mu}_{3}$"+"={}".format(np.round(I_skew,2)),xy=[0.4,0.90],xycoords='subfigure fraction')
+            gr.ax_marg_y.annotate("$\~{\mu}_{3}$"+"={}".format(np.round(var_skew,2)),xy=[0.875,0.8],xycoords='subfigure fraction')
+            gr.set_axis_labels('I (pA)', "$\sigma^2$ (pA$^2$)")
+            gr.ax_joint.grid(False)
+            gr.ax_marg_x.grid(False)
+            gr.ax_marg_x.grid(False)
+            gr.ax_joint.annotate("{}pS".format(np.abs(np.round(y_mean,2))),xy=[0.5,0.9],xycoords='axes fraction')
+            plt.tight_layout()
+            
     if not suppress_g:
         noise_axs.legend()
         raw_axs.legend()
@@ -879,14 +927,190 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
         if not parabola:
             print("If you wish to extend the parabola, call again with parabola = True. This can be useful to see whether a fit is adequate, and is particularly useful after binning")
         if return_var:
-            return(N,i,P_open,y_mean,x,cov,corr)
+            return(N,i,P_open,y_mean,x,cov,corr,I_skew,var_skew)
         else:
-            return(N,i,P_open,y_mean,cov,corr)
+            return(N,i,P_open,y_mean,cov,corr,I_skew,var_skew)
     else:
         if return_var:
-            return(N,i,P_open,y_mean,x,cov,corr)
+            return(N,i,P_open,y_mean,x,cov,corr,I_skew,var_skew)
         else:
-            return(N,i,P_open,y_mean,np.append(SD_errors,P_operrs),cov,corr)
+            return(N,i,P_open,y_mean,np.append(SD_errors,P_operrs),cov,corr,I_skew,var_skew)
+        
+# code in ROC NSFA - maybe as separate function
+    # this could also be used to decide best in optimisatio ntype problem.
+
+def NSFA_optimal(dataframe,r=[10,20,30,50,100,200,500,1000],optim_binsize = False,batchsize = 64, **kwargs):
+    """
+    Machine learning approach for deciding on the number of sweeps
+    to use for NSFA. The Number of sweeps and number of bins is recommended 
+    based on successive percentage change thresholds.
+        I.e. The earliest point at which the values of N and i and the skewness of I and variance
+        only change by a threshold fraction of their absolution range. This fraction is printed.
+        E.g. if threshold is 0.025, at this number of sweeps or bins, parameters are stable to within
+        2.5% of their range.
+    
+    Recommended usage is:
+        First instance #1: NSFA_optimal(dataframe,alignment=True,batchsize= at least 16,optim_binsize=True,num_bins=0)
+        Second instance #2: NSFA_optimal(dataframe,alignment=True,batchsize= at least 16,optim_binsize=False,num_bins=optimum_bin_number from #1)
+    #2 is thorough in the way that stability is checked
+    
+    Curves are plotted for estimates N,i,Po, and g_mean, as well as for skew of
+    the current and variance. These should be treated as ROC-type curves
+    to determine the number of sweeps to use for NSFA / show how estimates
+    stabilise.
+    
+    Randomly samples, without replacment r sweeps fro the dataframe. This is performed
+    for a number of times = batchsize, and the average is taken for that r.
+    This procedure is repeated for each r value to show how obtained estimates change.
+    This necessarily say which sweeps should be used, as that would entail 
+    n!/(r!(n--r)!) for n sweeps and a batchsize of r, which would have an excessive runtime;
+    but is a means for circumventing the problem of the sweep identity affecting estimates
+    when r<n.
+    
+    r (list): the number of sweeps with which to perform NSFA.
+    batchsize (int): the number of repeats of NSFA with r sweeps for each r (r<number of sweeps)
+    optim_binsize (Bool): If True, optimises the number of bins using the optimum number of (the same) sweeps. The range of binsizes are set as [0(ensemble), 10,20,50,100]
+    
+    **kwargs: keyword arguments for NSFA. Should NEVER include supress_g, or arguments that require excessive RAM (e.g. return var, or cov_corr)
+    and number of returns resulting from kwargs must ==6 
+    
+    
+    """
+    if 'alignment' in kwargs: # catch for kwargs and mult args in bin num optimisation
+        align=True
+    # call start time and end time
+    # generate 64 sets of random numbers j times, where j = length r
+    # so
+    start_time = get_peak(dataframe)
+    end_time = get_peak(dataframe)
+    
+    opt_sweepno = dataframe.shape[1] # fix 
+    sweep_thresh = np.nan # 
+    opt_binno = 10 #
+    bin_thresh = np.nan #
+
+    if dataframe.shape[1] > np.max(r):
+        return("max(r) cannot exceed number of sweeps")
+    batch_selected_params = np.zeros([batchsize,6])
+    batch_avg = np.zeros([len(r),6])
+    for item, value in enumerate(r):
+        if value < dataframe.shape[1]:
+            for batch in np.arange(batchsize):
+               sampled = sample(list(np.arange(dataframe.shape[1])),value)
+               selected = dataframe.iloc[:,sampled]
+               selected.columns = np.arange(selected.shape[1]) # fix for alignment
+               params = NSFA(selected,**kwargs,suppress_g=True,return_var = False,cov_corr=False,skew_analysis=False,start_time=start_time,end_time=end_time)
+               # params can change length based on kwargs - but for selected options
+               #should be fixed order: N,i,popen,y_mean
+               #and -2, -1 are skew
+               batch_selected_params[batch,:] = np.array([params[0],params[1],params[2],params[3],params[-2],params[1]]) # collect N,i,Popen,y_mean, I skew, var skew
+            #average param estimates for a batch
+            per_batch_params = batch_selected_params.mean(axis=0)
+        elif value == dataframe.shape: # when all sweeps included, do not need batchsize or avg
+            params = NSFA(dataframe,**kwargs,suppress_g=True,return_var = False,cov_corr=False,skew_analysis=False,start_time=start_time,end_time=end_time)
+            per_batch_params = np.array([params[0],params[1],params[2],params[3],params[-2],params[1]]) # collect N,i,Popen,y_mean, I skew, var skew
+        batch_avg[item,:] = per_batch_params
+        
+    optfig,optaxs = plt.subplots(3,2)
+    optaxs = optaxs.reshape(-1)
+    for item in np.arange(6):
+        if item == 3:
+            optaxs[item].plot(r,np.abs(batch_avg[:,item]),color='midnightblue')
+        else:
+            optaxs[item].plot(r,batch_avg[:,item],color='midnightblue')
+        optaxs[item].grid(False)
+    optaxs[0].set(xlabel="r", ylabel="N")
+    optaxs[1].set(xlabel="r", ylabel="i")
+    optaxs[2].set(xlabel="r", ylabel="Po")
+    optaxs[3].set(xlabel="r", ylabel="$\gamma_{mean}$")
+    optaxs[4].set(xlabel="r", ylabel="$\~{\mu}_{3}$"+"$\sigma^2$")
+    optaxs[5].set(xlabel="r", ylabel="$\~{\mu}_{3}$" + "I")
+    plt.tight_layout()
+    # could arguable normalise these and plot them as separate curves on same axis
+    # find optimimum number of sweeps, where skew params vary function10% of their range thereafter
+    
+    for threshold in [0.025,0.05,0.1]:
+        I_point = np.min([i for i, x in enumerate(np.abs(np.diff(batch_avg[:,5]))<np.abs(((batch_avg[:,5].max()-batch_avg[:,5].min())*threshold))) if x])
+        var_point = np.min([i for i, x in enumerate(np.abs(np.diff(batch_avg[:,4]))<np.abs(((batch_avg[:,4].max()-batch_avg[:,4].min())*threshold))) if x])
+        N_point = np.min([i for i, x in enumerate(np.abs(np.diff(batch_avg[:,0]))<np.abs(((batch_avg[:,0].max()-batch_avg[:,0].min())*threshold))) if x])
+        i_point = np.min([i for i, x in enumerate(np.abs(np.diff(batch_avg[:,1]))<np.abs(((batch_avg[:,1].max()-batch_avg[:,1].min())*threshold))) if x])
+        if np.all([I_point,var_point,N_point,i_point]):
+            opt_sweepno = r[np.max([I_point,var_point,N_point,i_point])]
+            sweep_thresh = threshold
+            break
+    if not opt_sweepno:
+        print("no optimum sweep number identified.")
+    if optim_binsize:
+        if opt_sweepno:
+            if not sweep_thresh:
+                sweep_thresh = np.nan
+            print("Using {} sweeps for binning optimisation, identified at {} threshold".format(opt_sweepno,sweep_thresh))
+        else:
+            print("Using all sweeps for bin optimisation")
+            opt_sweepno = dataframe.shape[1]
+        batch_selected_params = np.zeros([batchsize,6])
+        batch_avg = np.zeros([6,6])
+        for item, value in enumerate([0,10,20,50,100,200]):
+            if opt_sweepno < dataframe.shape[1]:
+                for batch in np.arange(batchsize):
+                   sampled = sample(list(np.arange(dataframe.shape[1])),opt_sweepno)
+                   selected = dataframe.iloc[:,sampled]
+                   selected.columns = np.arange(selected.shape[1]) # fix for alignment
+                   params = NSFA(selected,num_bins = value,aligment=align,suppress_g=True,return_var = False,cov_corr=False,skew_analysis=False,start_time=start_time,end_time=end_time)
+                   # params can change length based on kwargs - but for selected options
+                   #should be fixed order: N,i,popen,y_mean
+                   #and -2, -1 are skew
+                   batch_selected_params[batch,:] = np.array([params[0],params[1],params[2],params[3],params[-2],params[1]]) # collect N,i,Popen,y_mean, I skew, var skew
+                #average param estimates for a batch
+                per_batch_params = batch_selected_params.mean(axis=0)
+            elif opt_sweepno == dataframe.shape[1]: # when all sweeps included, do not need batchsize
+                params = NSFA(dataframe,num_bins = 0,**kwargs,suppress_g=True,return_var = False,cov_corr=False,skew_analysis=False,start_time=start_time,end_time=end_time)
+                per_batch_params = np.array([params[0],params[1],params[2],params[3],params[-2],params[1]]) 
+            batch_avg[item,:] = per_batch_params
+        optbinfig,optbinaxs = plt.subplots(3,2)
+        optbinaxs = optbinaxs.reshape(-1)
+        for item in np.arange(6):
+            if item == 3:
+                optbinaxs[item].plot([0,10,20,50,100,200],np.abs(batch_avg[:,item]),color='midnightblue')
+            else:
+                optbinaxs[item].plot([0,10,20,50,100,200],batch_avg[:,item],color='midnightblue')
+            optbinaxs[item].grid(False)
+        optbinaxs[0].set(xlabel="bins", ylabel="N")
+        optbinaxs[1].set(xlabel="bins", ylabel="i")
+        optbinaxs[2].set(xlabel="bins", ylabel="Po")
+        optbinaxs[3].set(xlabel="bins", ylabel="$\gamma_{mean}$")
+        optbinaxs[4].set(xlabel="bins", ylabel="$\~{\mu}_{3}$"+"$\sigma^2$")
+        optbinaxs[5].set(xlabel="bins", ylabel="$\~{\mu}_{3}$" + "I")
+        plt.tight_layout()
+        
+        for threshold in [0.025,0.05,0.1]:
+            try:
+                I_point = np.min([i for i, x in enumerate(np.abs(np.diff(batch_avg[:,5]))<np.abs(((batch_avg[:,5].max()-batch_avg[:,5].min())*threshold))) if x])
+                var_point = np.min([i for i, x in enumerate(np.abs(np.diff(batch_avg[:,4]))<np.abs(((batch_avg[:,4].max()-batch_avg[:,4].min())*threshold))) if x])
+                N_point = np.min([i for i, x in enumerate(np.abs(np.diff(batch_avg[:,0]))<np.abs(((batch_avg[:,0].max()-batch_avg[:,0].min())*threshold))) if x])
+                i_point = np.min([i for i, x in enumerate(np.abs(np.diff(batch_avg[:,1]))<np.abs(((batch_avg[:,1].max()-batch_avg[:,1].min())*threshold))) if x])
+            except ValueError as inst:
+                if threshold < 0.1:
+                    continue
+                else:
+                    opt_binno= False
+            if np.all([I_point,var_point,N_point,i_point]):
+                try:
+                    opt_binno = [0,10,20,50,100,200][np.max([I_point,var_point,N_point,i_point])]
+                    bin_thresh = threshold
+                    break
+                except IndexError: # catch for whne confidence not met
+                    bin_thresh = np.nan
+                    opt_binno = 10
+        if not opt_binno:
+            print("no optimum number of bins identified")
+        else:
+            print("optimum number of bins found as {} with {} threshold".format(opt_binno,bin_thresh))
+            return(opt_sweepno,sweep_thresh,opt_binno,bin_thresh)
+
+    else:
+        print("{} identified as optimum number of sweeps, at {} threshold".format(opt_sweepno,sweep_thresh))
+    return()
 
 def shared_N_NSFA(dataframe,voltages=[-60,-40,-20,0,20,40,60],num_bins = 20,Vrev = 0,open_tip_response = False,start_time = False,end_time = False,background_start = False,background_end = False):
     """
@@ -963,8 +1187,6 @@ def shared_N_NSFA(dataframe,voltages=[-60,-40,-20,0,20,40,60],num_bins = 20,Vrev
     background_end = background_end/1000
     background_start = background_start/1000
     ### find all currents in window start_time:end_time
-    
-    
     # need separate 'peaks' for each voltage
     peaks = []
     base = []
@@ -1151,14 +1373,22 @@ def recovery_from(record,num_events=8):
     print("select a time point before and then a second after the data points")
     recfig,recaxs = plt.subplots()
     for item in norm_pp:
-        recaxs.plot(item,color='black')
-    A,Tau = exp_fitter(recovery_frame,double=False,fitflag=False)
-        
+        recaxs.plot(item,color='dimgrey')
+    A,Tau = exp_fitter(recovery_frame,double=False,fitflag=False,give_axs=recaxs)
+    
+
     recaxs.set_title("Normalised recovery, Tau = {}".format(Tau))
+    recfig.tight_layout()
+    
+    #### cna just add that line here. previously, exp fitter seemed to use existing axis
     
     ### cna then scale data by peak current of first pulse = aligned_record.min()
     ### which doesn't matter, as when add scalebar, lose axis, so can just multiply by 
     # and then add scale bar
+    
+    # here: to fix: this code
+    # why not just plot the fit over
+    
     
     ## then scaling the plot back into pA 
     rec2fig,rec2axs = plt.subplots()
@@ -1166,9 +1396,9 @@ def recovery_from(record,num_events=8):
         xcoords = recaxs.get_lines()[item].get_xdata()
         ycoords = recaxs.get_lines()[item].get_ydata()
         if item == np.arange(np.size(recaxs.get_lines()))[-1]:
-            rec2axs.plot(xcoords,-(ycoords*aligned_record[0].min()),color='red',linestyle="--")
+            rec2axs.plot(xcoords,-(ycoords*aligned_record[0].min()),color='midnightblue',linestyle="--")
         else:
-            rec2axs.plot(xcoords,-(ycoords*aligned_record[0].min()),color='black')
+            rec2axs.plot(xcoords,-(ycoords*aligned_record[0].min()),color='dimgrey')
     rec2axs.grid(False)
     rec2axs.set_facecolor("white")
     add_scalebar(rec2axs,loc="lower right")
@@ -1176,6 +1406,7 @@ def recovery_from(record,num_events=8):
     print("Current of amplitude {} recovered from desensitisation with Tau ={}".format(aligned_record[0].min(),Tau))
     return(aligned_record[0].min(),Tau,recovery_frame)
 
+from sklearn.metrics import mean_squared_error
 def NBQX_unbinding(dataframe,open_tip_response,n_bins=100,give_onset = False,onset_lo_lim =False,onset_up_lim=False,give_peak = False):
     """
     Using Rosenmund et al., 1997 method of calculating subunit occupancy
@@ -1253,9 +1484,14 @@ def NBQX_unbinding(dataframe,open_tip_response,n_bins=100,give_onset = False,ons
     x = np.vstack((np.array(binned_peak.index/binned_peak.index[-1]),np.array([Tau_unbinding for item in binned_peak.index]),np.array([binned_peak.iloc[:,0].min() for item in binned_peak.index])))
     I =  np.array(binned_peak.iloc[:,0]) # currents to fit
     ## fitting unbiased: no initial estimates given for residuals.
-    popt,_ = sp.optimize.curve_fit(H_H_monofit_NBQX,x,I)
+    #popt,_ = sp.optimize.curve_fit(H_H_monofit_NBQX,x,I) #---- deprecated
+    popt,_ = sp.optimize.curve_fit(H_H_both_NBQX,x,I)
     ##### preparing the plot objects: binned fit, binned fit vs binned data, binned fit vs unbinned data 
     # as 3 separate plots, with t (ms) rather than norm
+    
+    rmse_fit = mean_squared_error(I,H_H_both_NBQX(x,popt[0],popt[1])+onset_current,squared=False)
+
+    
     hhfitfig1,hhfitaxis1 = plt.subplots()
     hhfitaxis1.set_title("Binned fit")
     hhfitaxis1.set_ylabel("I(pA)")
@@ -1269,14 +1505,14 @@ def NBQX_unbinding(dataframe,open_tip_response,n_bins=100,give_onset = False,ons
     hhfitaxis3.set_ylabel("I(pA)")
     hhfitaxis3.set_xlabel("ms")
     # plotting fit
-    hhfitaxis1.plot(1000*(np.array(binned_peak.index)),H_H_monofit_NBQX(x,popt),linestyle = "--",color="red")
+    hhfitaxis1.plot(1000*(np.array(binned_peak.index)),H_H_both_NBQX(x,popt[0],popt[1]),linestyle = "--",color="red")
     # plotting binned fit against binned data
     hhfitaxis2.plot(1000*(np.array(binned_peak.index)),np.array(binned_peak.iloc[:,0]),linestyle = "-",color="grey",label = "Binned Data")
-    hhfitaxis2.plot(1000*(np.array(binned_peak.index)),H_H_monofit_NBQX(x,popt),linestyle = "--",color="red",label = "fit:m={}".format(np.round(popt[0],2)))
+    hhfitaxis2.plot(1000*(np.array(binned_peak.index)),H_H_both_NBQX(x,popt[0],popt[1]),linestyle = "--",color="red",label = "fit:m={}".format(np.round(popt[0],2)))
     hhfitaxis2.legend()
     #plotting binned fit against current, with time and current offset at open-tip
-    hhfitaxis3.plot(1000*(np.array(peak_current.index-onset)),np.array(peak_current.mean(axis=1)),color='grey',label = "Mean Current (unbinned)")
-    hhfitaxis3.plot(1000*(np.array(binned_peak.index)),H_H_monofit_NBQX(x,popt)+onset_current,linestyle = "--",color='red',label = "fit:m={}".format(np.round(popt[0],2)))
+    hhfitaxis3.plot(1000*(np.array(peak_current.index-onset)),np.array(peak_current.mean(axis=1)),color='dimgrey',label = "Mean Current (unbinned)")
+    hhfitaxis3.plot(1000*(np.array(binned_peak.index)),H_H_both_NBQX(x,popt[0],popt[1])+onset_current,linestyle = "--",color='midnightblue',label = "fit:m={}".format(np.round(popt[0],2)))
     hhfitaxis3.legend()
 
     hhfitfig1.tight_layout()
@@ -1284,16 +1520,19 @@ def NBQX_unbinding(dataframe,open_tip_response,n_bins=100,give_onset = False,ons
     hhfitfig3.tight_layout()
     
     hhfitfig4,hhfitaxis4 = plt.subplots()
-    hhfitaxis4.plot(1000*(np.array(peak_current.index-onset)),np.array(peak_current.mean(axis=1)),color='black',label = "Data")
-    hhfitaxis4.plot(1000*(np.array(binned_peak.index)),H_H_monofit_NBQX(x,popt)+onset_current,linestyle = "--",color='red',label = "fit")
+    hhfitaxis4.plot(1000*(np.array(peak_current.index-onset)),np.array(peak_current.mean(axis=1)),color='dimgrey',label = "Data")
+    hhfitaxis4.plot(1000*(np.array(binned_peak.index)),H_H_both_NBQX(x,popt[0],popt[1])+onset_current,linestyle = "--",color='midnightblue',label = "fit")
     hhfitaxis4.grid(False)
     add_scalebar(hhfitaxis4,loc='center right')
     hhfitfig4.tight_layout()
 
     
-    print(" \n \n \n \n  \n \n \n \n \n mean peak current =",binned_peak.min()[0],"(pA)",",T = ",Tau_unbinding,"(s)",",m = ",popt[0], ",10-90 = ",((peak-onset)*0.9) - ((peak-onset)*0.1),"(s)")
+    print(" \n \n \n \n  \n \n \n \n \n mean peak current =",binned_peak.min()[0],"(pA)",",T = ",popt[1],"(s)",",m = ",popt[0], ",10-90 = ",((peak-onset)*0.9) - ((peak-onset)*0.1),"(s)")
     print("{} empty bins were removed.".format(dropped_cols))
-    return(binned_peak.min(),Tau_unbinding,popt,((peak-onset)*0.9) - ((peak-onset)*0.1)) # returning mean peak current, Tau_unbinding, m, and 10-90 rise time
+    print("Ignore Tau values. for ease fitted using -t/Tau, but makes incorrect in absolute terms.")
+    return(binned_peak.min(),popt[1],popt[0],((peak-onset)*0.9) - ((peak-onset)*0.1),rmse_fit) # returning mean peak current, Tau_unbinding, m, and 10-90 rise time in that order
+   
+
    
 def current_decay(dataframe,two_components=False):
     """
@@ -1352,7 +1591,7 @@ def current_decay(dataframe,two_components=False):
         xdata = xdata.transpose()
         times = t*10**3 # rescaling to mS
         popt,_ = sp.optimize.curve_fit(double_exp_fit,xdata,current_at_t) # popt = Tfast,Tslow
-        decayaxs.plot(times,double_exp_fit(xdata,popt[0],popt[1]),linestyle="--",color= 'red',label = "fit")
+        decayaxs.plot(times,double_exp_fit(xdata,popt[0],popt[1]),linestyle="--",color= 'midnightblue',label = "fit")
         decayaxs.plot(times,current_at_t,color = 'black',label = "data")
         decayaxs.set_title("Decay from 95% Ipeak:baseline. Tauf = {}ms,Taus = {}ms".format((popt[0]*10**3),(popt[1]*10**3)))
         decayaxs.legend()
@@ -1371,14 +1610,14 @@ def current_decay(dataframe,two_components=False):
         times = t*10**3 # rescaling to mS
         popt,_ = sp.optimize.curve_fit(exp_fit,xdata,current_at_t) #popt = Tau of single component
         decayaxs.plot(times,current_at_t,color = 'black',label = "data")
-        decayaxs.plot(times,exp_fit(xdata,popt),linestyle="--",color= 'red',label = "fit")
+        decayaxs.plot(times,exp_fit(xdata,popt),linestyle="--",color= 'midnightblue',label = "fit")
         decayaxs.set_title("Decay from 95% Ipeak:baseline. Tau = {}ms".format((popt[0]*10**3)))
         decayaxs.legend()
         decayfig.tight_layout()
         return(popt[0]*10**3)
     
 
-def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,show_components=False):
+def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,show_components=False,give_axs=False):
     """Fits an exponential or sum of expontials to pandas structure data (either dataframe or series).
     If DataFrame is used, the fit is performed to the average of all waves
     
@@ -1395,6 +1634,11 @@ def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,sh
     if the beginning of the fit is more positive than the end, a negative exponential or sum of, is fitted"""
     if len(pandas_structure.shape) == 2: #if dataframe
         pandas_structure = pandas_structure.mean(axis=1)
+    
+    if not give_axs:
+        fitfig,fitaxs = plt.subplots()
+    else:
+        fitaxs = give_axs
     
     if not double:
         start_fit = get_component(pandas_structure,'start of the')
@@ -1413,8 +1657,9 @@ def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,sh
             popt,pcov = sp.optimize.curve_fit(posmonoexp,x,x[1,:])
             mtype = "positive"
             if fitflag:
-                plt.plot(x[0,:]+It.index[0],posmonoexp(x,popt[0],popt[1])+It.iloc[-1],linestyle ='--',color='red',label = 'fit')
-            plt.plot(It.index,It,color='black',label='data')
+                fitaxs.plot(x[0,:]+It.index[0],posmonoexp(x,popt[0],popt[1])+It.iloc[-1],linestyle ='--',color='midnightblue',label = 'fit')
+            fitaxs.plot(It.index,It,color='dimgrey',label='data')
+
             
         else: # or else, fit negative exponential
             #p0 = -(It.index[-1]/It.iloc[-1])/(np.log(Imax)) #deprecated together with np.isinf codition. No initial guess now provided
@@ -1422,14 +1667,18 @@ def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,sh
             popt,pcov = sp.optimize.curve_fit(negmonoexp,x,x[1,:])
             mtype = "negative"
             if fitflag:
-                 plt.plot(x[0,:]+It.index[0],negmonoexp(x,popt[0],popt[1])+It.iloc[-1],linestyle ='--',color='red',label = 'fit')
-            plt.plot(It.index,It,color='black',label= 'data')
-           
-            
+                 fitaxs.plot(x[0,:]+It.index[0],negmonoexp(x,popt[0],popt[1])+It.iloc[-1],linestyle ='--',color='midnightblue',label = 'fit')
+            fitaxs.plot(It.index,It,color='dimgrey',label= 'data')
+
         Tau = np.abs(popt[1])
         print("A {} monoexponential function was fitted,a={} from fit end,Tau = {}".format(mtype,popt[0],Tau))
         plt.show()
         print("1SD errors = {}".format(np.sqrt(np.diag(pcov))))
+        fitaxs.legend(loc='center right')
+        fitaxs.grid(False)
+        fitaxs.set_facecolor('white')
+        add_scalebar(fitaxs,loc="lower right")
+        plt.tight_layout()
         return(popt[0],Tau)
     if double:
         start_fit = get_component(pandas_structure,'start of the fast')
@@ -1451,14 +1700,13 @@ def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,sh
              else:
                  popt,pcov = sp.optimize.curve_fit(posdouble_exp,x,x[1,:])
              mtype = "positive"
-             plt.plot(x[0,:]+It.index.min(),x[1,:],color='black',label = "Data")
+             fitaxs.plot(x[0,:]+It.index.min(),x[1,:],color='dimgrey',label = "Data")
              if fitflag:
-                 plt.plot(x[0,:]+It.index.min(),posdouble_exp(x,popt[0],popt[1],popt[2],popt[3]+It.iloc[-1]),linestyle ="--",color='red',label = 'Fit')
+                 fitaxs.plot(x[0,:]+It.index.min(),posdouble_exp(x,popt[0],popt[1],popt[2],popt[3]+It.iloc[-1]),linestyle ="--",color='midnightblue',label = 'Fit')
              if show_components:
                  posmonoexp = lambda x,a,tau: a*(np.exp(x[0,:]/tau))
-                 plt.plot(x[0,:]+It.index.min(),posmonoexp(x, popt[0], popt[2]),label='Fast component',color='lightskyblue',linestyle="--")
-                 plt.plot(x[0,:]+It.index.min(),posmonoexp(x, popt[1], popt[3]),label='Slow component',color='royalblue',linestyle="--")
-             plt.legend()
+                 fitaxs.plot(x[0,:]+It.index.min(),posmonoexp(x, popt[0], popt[2]),label='Fast component',color='lightskyblue',linestyle="--")
+                 fitaxs.plot(x[0,:]+It.index.min(),posmonoexp(x, popt[1], popt[3]),label='Slow component',color='royalblue',linestyle="--")
         else:
              negdouble_exp = lambda x,a,b,taufast,tauslow: (a*(np.exp(-x[0,:]/taufast)))+(b*(np.exp(-x[0,:]/tauslow)))
              if np.any(B_seed_val):
@@ -1466,20 +1714,26 @@ def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,sh
              else:
                  popt,pcov = sp.optimize.curve_fit(negdouble_exp,x,x[1,:])
              mtype = "negative"
-             plt.plot(x[0,:]+It.index.min(),x[1,:]+It.min(),color='black',label = "Data")
+             fitaxs.plot(x[0,:]+It.index.min(),x[1,:]+It.min(),color='dimgrey',label = "Data")
              if fitflag:
-                 plt.plot(x[0,:]+It.index.min(),negdouble_exp(x,popt[0],popt[1],popt[2],popt[3])+It.iloc[-1],linestyle ="--",color='red',label = 'Fit')
+                 fitaxs.plot(x[0,:]+It.index.min(),negdouble_exp(x,popt[0],popt[1],popt[2],popt[3])+It.iloc[-1],linestyle ="--",color='midnightblue',label = 'Fit')
              if show_components:
                  negmonoexp = lambda x,a,tau: a*(np.exp(-x[0,:]/tau))
-                 plt.plot(x[0,:]+It.index.min(),negmonoexp(x, popt[0], popt[2]),label='Fast component',color='lightskyblue',linestyle="--")
-                 plt.plot(x[0,:]+It.index.min(),negmonoexp(x, popt[1], popt[3]),label='Slow component',color='royalblue',linestyle="--")
-             plt.legend()
+                 fitaxs.plot(x[0,:]+It.index.min(),negmonoexp(x, popt[0], popt[2]),label='Fast component',color='lightskyblue',linestyle="--")
+                 fitaxs.plot(x[0,:]+It.index.min(),negmonoexp(x, popt[1], popt[3]),label='Slow component',color='royalblue',linestyle="--")
+
         # correcting time constant and amplitude values for their real domain
 # =============================================================================
 ######===========================================######
 # reinstated partially: 160321:
     #returning tau as absolute value
     # returning absolute value of A, rather than relative to B
+    
+        fitaxs.legend(loc='center right')
+        fitaxs.grid(False)
+        fitaxs.set_facecolor('white')
+        add_scalebar(fitaxs,loc="lower right")
+        plt.tight_layout()
         A = popt[1] + popt[0]
         B = np.abs(popt[1])
         Taufast = np.abs(popt[2])
@@ -1490,7 +1744,7 @@ def exp_fitter(pandas_structure, double = False,fitflag=True,B_seed_val=False,sh
         print("The weighted time constant is = {}".format(weightedtau))
         print("A sum of {} exponentials was fitted. A = {} from fit end, B = {}, Taufast = {},Tauslow={}".format(mtype,A,B,Taufast,Tauslow))
         print("1SD errors = {}".format(np.sqrt(np.diag(pcov))))
-        plt.show()
+
         return(A,B,Taufast,Tauslow,weightedtau)
 #____________________________________________________________________________#
 #----------------------------- Data Saving ----------------------------------#
@@ -1811,13 +2065,26 @@ def shared_N_noise_fun_to_60(x,N,i_m60,i_m40,i_m20,i_0,i_20,i_40,i_60):
     return(np.concatenate((noise_func(x[:,:num_bins],N,i_m60),noise_func(x[:,num_bins:2*num_bins],N,i_m40),noise_func(x[:,2*num_bins:3*num_bins],N,i_m20),noise_func(x[:,3*num_bins:4*num_bins],N,i_0),noise_func(x[:,4*num_bins:5*num_bins],N,i_20),noise_func(x[:,5*num_bins:6*num_bins],N,i_40),noise_func(x[:,6*num_bins:7*num_bins],N,i_60))))
 
 def H_H_monofit_NBQX(x,m):
-    """Embedded function to fit a monoexponential Hodgkin-Huxley
+    """Embedded function to fit a logistic Hodgkin-Huxley
     type equation I_t = A*(1-e^(-t/Tau))^m, using Tau as an argument for sweeps in
     a dataframe.Here Tau is for NBQX unbinding. Takes tuple containing t and Tau"""
     t = x[0,:]
     Tau = x[1,:]
     A = x[2,:]
     return(np.array(A*(1-np.exp(-t/Tau))**m))
+
+def H_H_both_NBQX(x,m,Tau):
+    """Embedded function to fit a logistic Hodgkin-Huxley
+    type equation I_t = A*(1-e^(-t/Tau))^m, using Tau as an argument for sweeps in
+    a dataframe.Here Tau is for NBQX unbinding. Takes tuple containing t and Tau
+    
+    NB, A is constrained to the minimum mean current bin. It doesn't have to be, but
+    doesn't make any difference to fitted values.
+    """
+    t = x[0,:]
+    A = x[2,:]
+    return(np.array(A*(1-np.exp(-t/Tau))**m))
+
 
 def exp_fit(x,Tau):
     # where x is an independent variable contianing data for A1, time, and Iss
