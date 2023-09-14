@@ -889,7 +889,7 @@ def NSFA(dataframe,pairwise = False,voltage=-60,num_bins = 10,Vrev = 0,parabola 
     y_mean = (np.max(np.abs(x[0,:]))/((voltage*10**-3)-Vrev)/P_open)/N
     if not suppress_g:
         pubfig,pubaxs = plt.subplots()
-        pubaxs.plot(np.abs(-x[0,:]),np.abs(noise_func(x[:2,:],popt[0],popt[1]))-np.abs(x[1,:]),color='black',Label = 'Fit')
+        pubaxs.plot(np.abs(-x[0,:]),np.abs(noise_func(x[:2,:],popt[0],popt[1]))-np.abs(x[1,:]),color='black',label = 'Fit')
         pubaxs.scatter(np.abs(-x[0,:]),x[2,:]-x[1,:],color ='midnightblue',marker='.',label="Binned Data")
         pubaxs.grid(False)
         pubaxs.set_xlabel("I")
@@ -2175,6 +2175,3 @@ def add_scalebar(ax, matchx=True, matchy=True, hidex=True, hidey=True, **kwargs)
     if hidey : ax.yaxis.set_visible(False)
     if hidex and hidey: ax.set_frame_on(False)
     return sb
-
-
-
